@@ -286,6 +286,26 @@ Known issues (investigated 2026-10-30):
 
 **No "processes are running" warnings (2026-10-30).** Warp asks before quitting or closing a tab/window when commands are running, because for Warp that kills them. In Swarm they keep running in the daemon, so `quit_warning` no longer counts running commands when daemon sessions are on. It still warns about unsaved files and live shared sessions, which closing does lose. Title: "Quit Swarm?". Verified: with a counter loop open in a tab, quitting takes ~1 s with no dialog. Across 15 s with the app closed the loop produced 128 more lines, and the reattach replayed `n=0..554` with no gaps. "Connect…" isn't shown until remote hosts work (M3), rather than as a dead button. The title bar and sidebar are the first thing users see, and the picker is what makes detached sessions reachable.
 
+### Sidebar or tabs (built 2026-10-30)
+
+The sidebar button (⌘B) switches between the two layouts from §9b. With the sidebar shown, sessions are listed in it (Warp's vertical tabs panel). With it hidden, sessions become tabs across the title bar (Warp's horizontal tab bar), and the button stays at the left of the title bar to bring the sidebar back. Implemented by having the toggle switch Warp's `use_vertical_tabs` setting, so every part of Warp's layout follows, and the choice is remembered. The Swarm title bar controls (Connect…, N detached) appear in both layouts. Verified in the app: sidebar → tabs → sidebar.
+
+### Remote hosts in the app (built 2026-10-30)
+
+- **Connections.** `local_tty::daemon::Daemons` holds one client per host on a shared runtime: `None` is the local daemon, `Some(alias)` is `ssh <alias> swarmd bridge`, reconnecting on demand. The spawner, the session watchers, renames and tab-close updates all go through it.
+- **Remote tabs** reuse the reattach path: `ReattachTab { host, … }` adds `SWARM_REATTACH_HOST`. "New session on <host>" creates a login shell there (`daemon::create_session`), then opens it like an idle shell started elsewhere: Warp's setup script is typed in, and its Warp session id is stored on the session. Warp classifies the session as `WarpifiedRemote` by hostname, so completions and prompt chips run on the server (the in-band executor), not on the Mac. A remote tab reports pid 1, since the remote shell's pid means nothing locally.
+- **UI.** "Connect…" in the title bar lists hosts from `~/.ssh/config` and its `Include`s (quoted paths with spaces handled). Picking one runs `check_host` (`ssh -o BatchMode=yes`), and then:
+  - lists that host's sessions plus "New session on <host>";
+  - or offers to install `swarmd` (copying the app's own binaries when the host has this Mac's OS/CPU);
+  - or explains: ssh's own error, or that there's no bundled binary for that OS.
+- **Dropped connections.** When a remote stream closes, the bridge reconnects with backoff (up to ~40 tries) and resumes with `ResumeFrom(last offset)`, unless the tab was closed or the session is gone.
+
+Verified against the Linux VM (`orb`):
+- Connect → `orb` → New session opened a bash tab on the VM with Warp's prompt (user chip `naotar@swarm-test`), and a command ran there (`remote-Linux-swarm-test-42`).
+- Killing the app's ssh connection: "connection to daemon lost" → "reconnected … after 1 attempt(s)" about 6 s later.
+
+**Not done yet:** Linux binaries bundled for one-click install on Linux hosts; remote tabs aren't reopened at launch (design: offer "Reconnect to <host>"); no "Reconnecting…" indicator on the tab; host labels and colors on tabs.
+
 ### What to change in the Warp fork
 1. **Add `daemon_tty::TerminalManager`** as a third implementation of the `TerminalManager` trait, modeled on `remote_tty`. Instead of a websocket it uses `swarm-client` (our protocol over a unix socket or ssh stdio), and it maps `Message::Input` / `Resize` onto `Input` / `Resize` frames. Everything above it (grid, blocks, input editor, rendering) stays unchanged.
    - Select the manager **at runtime** in `pane_group` rather than with the `remote_tty` / `local_tty` cfg. In production every tab uses `daemon_tty`. `local_tty` stays only for tests and as an emergency fallback when no daemon can start.

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+#[cfg(target_os = "macos")]
 use swarm_proto::paths;
 
 const DEFAULT_NAME: &str = "dev.swarm.swarmd";
@@ -42,6 +43,7 @@ fn passthrough_env() -> Vec<(String, String)> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
