@@ -304,7 +304,9 @@ Verified against the Linux VM (`orb`):
 - Connect → `orb` → New session opened a bash tab on the VM with Warp's prompt (user chip `naotar@swarm-test`), and a command ran there (`remote-Linux-swarm-test-42`).
 - Killing the app's ssh connection: "connection to daemon lost" → "reconnected … after 1 attempt(s)" about 6 s later.
 
-**Not done yet:** Linux binaries bundled for one-click install on Linux hosts; remote tabs aren't reopened at launch (design: offer "Reconnect to <host>"); no "Reconnecting…" indicator on the tab; host labels and colors on tabs.
+**Reopening remote tabs at launch.** A successful Connect remembers the host alias in `$STATE_DIR/hosts`. The first window of a run then asks each remembered host, in the background, for running sessions marked to reopen that nothing is attached to (`daemon::reopenable_sessions`, 20 s timeout) and adds them as tabs, keeping focus on the current tab; unreachable hosts are skipped and logged. This is simpler than the earlier "Reconnect to <host>" prompt idea, and closing a remote tab still means "don't reopen". Verified with the VM: open a remote tab → quit → relaunch → the remote session comes back as a tab next to the local one.
+
+**Not done yet:** Linux binaries bundled for one-click install on Linux hosts; no "Reconnecting…" indicator on the tab; host labels and colors on tabs; remote session labels use the shell's window title, which bash sets to the last command.
 
 ### What to change in the Warp fork
 1. **Add `daemon_tty::TerminalManager`** as a third implementation of the `TerminalManager` trait, modeled on `remote_tty`. Instead of a websocket it uses `swarm-client` (our protocol over a unix socket or ssh stdio), and it maps `Message::Input` / `Resize` onto `Input` / `Resize` frames. Everything above it (grid, blocks, input editor, rendering) stays unchanged.
