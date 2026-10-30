@@ -256,7 +256,7 @@ Verified in the bundled app: launch → run a command → quit → the session k
 
 | # | Swarm piece (mockup) | Warp code it replaces or extends |
 |---|---|---|
-| 1 | Title bar: sidebar toggle, window title, "Connect…", "N detached" | workspace header in `workspace/view.rs` (search box "Search sessions, agents, files…", AI/inbox/settings icons) |
+| 1 ✅ (Connect… comes with M3) | Title bar: sidebar toggle, window title, "Connect…", "N detached" | workspace header in `workspace/view.rs` (search box "Search sessions, agents, files…", AI/inbox/settings icons) |
 | 2 | Sidebar layout: host groups with counts, state marks, folder/command, last activity, "attached elsewhere" dot, filter, `+`, footer buttons | vertical tabs panel, `workspace/vertical_tabs.rs` |
 | 3 | Tabs layout: host-grouped tab bar with state marks | horizontal tab bar (`workspace/tab_group.rs` and header) |
 | 4 | Session picker popover (host switcher, filter, multi-select, open/terminate) | new view, backed by `swarm-client` |
@@ -267,7 +267,9 @@ Verified in the bundled app: launch → run a command → quit → the session k
 | 9 | Menu bar extra | new `NSStatusItem` in `crates/warpui/src/platform/mac` |
 | 10 | Warp's AI, Drive and cloud surfaces off by default; debug-build "Lines: … Size: …" block footer off in Swarm | feature flags / `swarm.rs` |
 
-Order: 1 → 2 → 10 → 4 → 6 → 3 → 5 → 7 → 8 → 9. The title bar and sidebar are the first thing users see, and the picker is what makes detached sessions reachable.
+Order: 1 → 2 → 10 → 4 → 6 → 3 → 5 → 7 → 8 → 9.
+
+**Title bar (done 2026-10-30):** with `swarm::SWARM_CHROME`, the vertical-tabs title bar shows only the sidebar toggle, the active tab's title centered, and "N detached" while sessions are running with no client attached. The count comes from the `SwarmSessions` model (`app/src/swarm/sessions.rs`), which follows the daemon through `daemon::watch_sessions` (subscribe, coalesced re-list, reconnect), so it updates live. Clicking it opens a menu of detached sessions. Picking one opens a tab re-attached to it and sets `auto_attach=true` again. Sessions started outside Swarm (no Warp shell integration) are listed but disabled for now. "Connect…" isn't shown until remote hosts work (M3), rather than as a dead button. The title bar and sidebar are the first thing users see, and the picker is what makes detached sessions reachable.
 
 ### What to change in the Warp fork
 1. **Add `daemon_tty::TerminalManager`** as a third implementation of the `TerminalManager` trait, modeled on `remote_tty`. Instead of a websocket it uses `swarm-client` (our protocol over a unix socket or ssh stdio), and it maps `Message::Input` / `Resize` onto `Input` / `Resize` frames. Everything above it (grid, blocks, input editor, rendering) stays unchanged.
