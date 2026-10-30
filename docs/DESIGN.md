@@ -248,7 +248,7 @@ Host settings are stored locally in `$CONFIG_DIR/swarm/hosts.toml`: ssh alias, d
 | Peer credential check | `SO_PEERCRED` | `getpeereid` / `LOCAL_PEERCRED` |
 | Foreground command for tab label | `tcgetpgrp` + `/proc/<pid>/cmdline` | `tcgetpgrp` + `proc_pidpath` / `sysctl(KERN_PROCARGS2)` |
 | cwd fallback (no OSC 7) | `/proc/<pid>/cwd` | `proc_pidinfo(PROC_PIDVNODEPATHINFO)` |
-| `at-login` service | systemd `--user` unit, `KillMode=process` | LaunchAgent in `~/Library/LaunchAgents`, `ProcessType=Interactive` |
+| `at-login` service | systemd `--user` unit, `KillMode=process` | Local Mac with the app installed: `SMAppService.agent` registering a LaunchAgent plist bundled in the app (§9b). Remote Mac without the app: plist in `~/Library/LaunchAgents`, `ProcessType=Interactive` |
 | Survives ssh logout | needs linger unless `KillUserProcesses=no` (§3 step 4) | yes, `setsid` processes started over ssh survive logout |
 | Remote prerequisite | sshd running | "Remote Login" enabled in System Settings → General → Sharing |
 
@@ -258,6 +258,134 @@ macOS notes:
 - **Gatekeeper:** a binary copied over ssh/scp gets no quarantine flag, so it runs, but arm64 requires a valid signature; release builds are Developer ID signed (ad-hoc signing is enough for dev builds).
 - **Sleep:** a sleeping remote Mac drops connections; the client's reconnect + `ResumeFrom` (§6) covers it. Optional setting for that host: run `caffeinate -s` while sessions are attached.
 - **Full Disk Access / TCC:** shells started by `swarmd` inherit the daemon's privacy permissions, not the GUI's. Commands touching protected folders (Desktop, Documents, removable volumes) may prompt or fail; document granting access to `swarmd` if needed.
+
+## 9b. The macOS app and its user interface
+
+The Mac app is the primary product, so its quality bar is "feels like a first-class Mac app", not "a Linux terminal that runs on a Mac". This section sets the rules for that.
+
+### What Warp gives us and what we add
+Warp's UI framework (`warpui`, MIT) on macOS renders with **Metal** and already uses native **menus** (`NSMenu`), **alerts**, **notifications**, clipboard and an **accessibility** layer. Tabs, the terminal and the input editor are custom-drawn, which is fine for a terminal. What it doesn't have, and we add in `warpui`'s mac platform layer (MIT, so these can go upstream):
+
+| Missing | Why we need it |
+|---|---|
+| Menu bar extra (`NSStatusItem`) | Sessions keep running when the app is closed. The menu bar icon shows that and opens sessions without opening the whole app. |
+| Login item via `SMAppService` | `at-login` daemon mode is registered the way macOS expects, and it appears correctly in System Settings → Login Items. |
+| Sparkle 2 updates | Warp's updater talks to Warp's servers; we need our own feed. |
+| Vibrancy (`NSVisualEffectView`) for the sidebar/popovers (optional) | Matches the look of current macOS apps; behind a setting. |
+
+### Principles
+1. **Keyboard-first, mouse-complete.** Everything reachable from the keyboard; everything also discoverable through the menu bar (macOS users look there for features).
+2. **Follow macOS conventions over Warp's** where they conflict: standard shortcuts, standard Settings window (Cmd+,), standard window restoration, light/dark following the system.
+3. **Make the "sessions keep running" model visible.** This is the product's main difference from every other Mac terminal. Users must always be able to see what is running, where, and whether they are attached.
+4. **Never lose work by surprise.** Nothing kills a process without an explicit, clearly-labeled action. Cmd+Q and closing a tab never prompt "processes are running", because nothing will be killed.
+5. **Fast and calm.** No spinners for local operations; remote waits show progress inline in the tab, never as blocking modals.
+
+### Main window
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ ● ● ●   [● api  ~/src/api] [● logs  tail -f] [◐ build ⟳] | ▣ devbox: [● db] [○ web]   +  ⌄ 3 detached │
+├──────────────────────────────────────────────────────────────────────────┤
+│                         Warp blocks + input editor                        │
+│                                                                           │
+├──────────────────────────────────────────────────────────────────────────┤
+│ local · zsh · ~/src/api · 120×40                    also attached: mini-2 │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+- **Tabs are grouped by host.** Local tabs first, then one group per remote host with its name and color (the color also tints the tab's top edge). Groups can be collapsed.
+- **`+`** creates a session on the host of the current tab. Holding Option, or the `⌄` next to it, picks a host.
+- **"N detached"** opens the session picker for detached sessions (§8, item 6).
+- **Thin status bar** (optional, on by default): host, shell, cwd, size, and who else is attached.
+- Tabs can be dragged into their own window and back; every window shows the same kind of tab bar.
+
+### Session states (the visual language)
+Each state uses a **shape and a color**, never color alone, so it works for color-blind users and in grayscale.
+
+| State | Tab indicator | Meaning |
+|---|---|---|
+| Running, idle | `●` filled dot | Shell waiting at a prompt |
+| Running a command | `◐` + spinner on long commands | Foreground process other than the shell |
+| New output since last viewed | dot + bold title | Something happened in a background tab |
+| Bell / needs attention | `!` badge | Bell or a command failed in the background |
+| Exited | `○` hollow, dimmed title | Process ended; tab shows exit code with [Restart] [Close] |
+| Reconnecting | dimmed tab + `⟳` | Remote connection lost, retrying |
+| Attached elsewhere | small second dot | Another client is attached too |
+
+### Session picker (local and remote)
+A popover from "N detached", from the host group's menu, or with **Cmd+O**. It's the same component for local and remote sessions.
+```
+┌ Open sessions on devbox ──────────────── ⌕ filter ┐
+│ ☐ ● db          ~/srv/db      psql       2m ago   │
+│ ☐ ○ web         ~/srv/web     exited 0   1h ago   │
+│ ☐ ● migrate     ~/srv         cargo run  now  ◉◉  │
+│───────────────────────────────────────────────────│
+│ + New session on devbox     Open all   [Open (2)] │
+└───────────────────────────────────────────────────┘
+```
+- Type to filter; arrow keys and Space to select; Return opens; Cmd+Return opens all matches; Cmd+Delete terminates (with confirm).
+- Rows show name, cwd, foreground command, last activity, state and other attached clients.
+- Right-click on a row: Rename, Terminate, Copy attach command (`swarmctl attach …`).
+
+### Connect to host
+**Cmd+Shift+K** opens a sheet with hosts from `~/.ssh/config` and saved hosts, plus a field for `user@host`. The connect flow (§9) runs **inline in the sheet** as a short checklist: "SSH access ✓ → swarmd 0.4.1 ✓ → 5 sessions" with a clear message and fix if a step fails (for example, "Permission denied (publickey). Add your key with `ssh-add`, then retry"). The sheet then turns into the session picker.
+
+### Menu bar (application menus)
+| Menu | Items |
+|---|---|
+| **File** | New Session (Cmd+T), New Session on Host ▸, Open Session… (Cmd+O), Connect to Host… (Cmd+Shift+K), Detach Tab (Cmd+W), Terminate Session… (Cmd+Shift+W), Close Window |
+| **Session** | Rename… , Tab Color ▸, Restart (when exited), Attach Read-Only, Copy Attach Command, Show Session Info (Cmd+I) |
+| **View** | Show Status Bar, Collapse Host Groups, Warp's existing view items |
+| **Window** | Standard items, plus a list of tabs grouped by host; Move Tab to New Window |
+
+Cmd+N follows the "window ⇒ tab" decision (§8, item 4): it creates a new session tab in the front window. Every Warp default shortcut is audited against this table and macOS conventions before M2 ships.
+
+### Menu bar extra
+An optional menu bar icon (on by default) shows:
+- daemon status per host (local, and each connected remote);
+- sessions per host, with their state dot; clicking one opens the app on that tab;
+- "New Session", "Open Swarm", "Settings…".
+
+It's the reminder that sessions are still running when the app's windows are closed. The app keeps running in the background while the menu bar extra is enabled (like Mail or Slack), and quits fully when it's disabled. Sessions keep running in both cases.
+
+### Notifications and Dock
+- Notifications (opt-in per type): long command finished in a background tab; session exited with non-zero code; remote host disconnected and couldn't reconnect.
+- Dock badge: number of tabs needing attention (bell, failure). Dock menu: list of sessions with attention, "New Session".
+
+### Settings window (Cmd+,)
+Standard toolbar-style Settings window with panes:
+- **General** — on launch (restore tabs), menu bar extra, notifications;
+- **Sessions** — default shell, scrollback size, exited-session retention, size policy;
+- **Daemon** — start mode (`with-app` / `at-login`), status, restart daemon, open logs;
+- **Hosts** — saved hosts, color, start mode, remove; "Reinstall swarmd";
+- **Appearance / Keys / Privacy** — Warp's existing panes, with cloud features off by default.
+
+### First run
+One sheet (§3a): daemon start mode, optional "Connect to a server", and a single line explaining the core idea: *"Closing a tab or quitting Swarm doesn't stop your sessions. Use Session → Terminate to end one."*
+
+### Accessibility
+- VoiceOver labels for every new control (tabs announce name, host and state; picker rows announce all columns). Verify with VoiceOver on every new view before merging.
+- Full keyboard navigation of the picker, connect sheet and settings.
+- Respect Reduce Motion (no spinners or animations; static `◐` instead), Increase Contrast, and system accent color.
+
+### Performance budgets (measured on an M1 MacBook Air)
+| Action | Target |
+|---|---|
+| Launch to first interactive tab (daemon already running) | < 500 ms |
+| Reattach a tab with a full 16 MB buffer | last screen visible < 150 ms, full history < 1 s |
+| New local session | < 100 ms to prompt (excluding shell rc time) |
+| Keystroke-to-screen latency | same as upstream Warp (no added hop cost beyond the local socket, < 1 ms) |
+
+To meet the reattach budget, the client **renders the tail first**: the shim sends the bytes from the last boundary immediately, then backfills earlier blocks, which the client prepends to the block list.
+
+### Distribution
+- Universal app (arm64 + x86_64), **macOS 13 Ventura or later** (needed for `SMAppService`).
+- Hardened runtime, Developer ID signed and notarized; DMG and Homebrew cask.
+- `swarmd`, `swarm-shim` and `swarmctl` ship inside the bundle (`Contents/MacOS/`). A Settings button installs a `swarmctl` symlink into `/usr/local/bin` or `~/.local/bin`.
+- Updates with Sparkle 2 (EdDSA-signed feed on GitHub Releases). Updating the app never restarts running shims; `swarmd` is restarted and re-adopts them (§3).
+
+### Design process
+1. Clickable mockups of the main window, picker, connect sheet, first run and settings **before M2 coding**, reviewed against the principles above.
+2. A UI checklist per pull request: light and dark mode, VoiceOver, keyboard-only use, Reduce Motion, screenshots attached.
+3. Dogfood from M2 on: the team uses swarm-term as its daily terminal, and UI issues get a label and their own triage.
 
 ## 10. Security
 
@@ -297,9 +425,10 @@ app/              the Warp fork (git subtree or separate repo pinned by commit)
 |---|---|---|
 | **M0 – spike** | shim + `swarmctl attach` with raw passthrough (dtach-equivalent) | Run vim/htop, detach, reattach from another terminal |
 | **M1 – daemon** | `swarmd` registry, protocol v1, multi-client, ring buffer, boundary replay, `ResumeFrom`, daemon restart re-adopts shims | Kill `swarmd`, sessions survive and re-appear |
-| **M2 – GUI local** | Warp fork with `daemon_tty` `TerminalManager`, runtime manager selection, replay guard, idempotent bootstrap, startup restore, window⇒tab, close/detach semantics, first-run sheet, start-mode setting (`with-app` / `at-login` service install) | Quit app with 5 tabs, reopen, identical blocks restored |
+| **D – UI design** (in parallel with M0–M1) | Clickable mockups of main window, session states, picker, connect sheet, menus, menu bar extra, settings, first run (§9b) | Mockups reviewed and agreed before M2 starts |
+| **M2 – GUI local** | Warp fork with `daemon_tty` `TerminalManager`, runtime manager selection, replay guard, idempotent bootstrap, startup restore, window⇒tab, close/detach semantics, first-run sheet, start-mode setting (`with-app` / `at-login` via `SMAppService`), host-grouped tab bar, session-state indicators, local session picker, menus and shortcuts, Settings window, menu bar extra | Quit app with 5 tabs, reopen, identical blocks restored; §9b performance budgets met; UI checklist passes |
 | **M3 – remote** | `swarmd bridge`, ssh transport, provisioning for Linux and macOS hosts, per-host start mode, session picker dropdown, reconnect | Laptop sleep/wake against remote host resumes without visual reset |
-| **M4 – polish** | alt-screen snapshots, tab drag-out, size policies, readonly attach, settings, optional "restore after reboot" (recreate sessions with the same name/cwd/tab order, without the processes) | — |
+| **M4 – polish** | alt-screen snapshots, tab drag-out, size policies, readonly attach, notifications and Dock badge, Sparkle updates, signed/notarized DMG and Homebrew cask, optional "restore after reboot" (recreate sessions with the same name/cwd/tab order, without the processes) | — |
 
 M0–M1 are independent of Warp and de-risk the hard part; M2 is where most of the unknowns are.
 
