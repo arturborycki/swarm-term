@@ -248,6 +248,27 @@ Verified in the bundled app: launch → run a command → quit → the session k
 
 **Known gaps:** after a reattach the prompt's folder shows `/Users/<me>` instead of `~` (the session's home-dir info isn't fully restored), a stray `%` appears in the first replayed block, and replayed block durations are wrong. Tab order isn't recorded yet (`tab_order`), only creation order. The Swarm UI (picker, host groups, first-run sheet, branding) isn't built.
 
+### Swarm identity and UI build plan (2026-10-30)
+
+**Done:** the fork has its own `swarm` binary (`app/src/bin/swarm.rs`, Warp's OSS channel underneath) bundled as **Swarm.app**: bundle id `dev.swarm.Swarm`, URL scheme `swarm`, log `~/Library/Logs/swarm.log`, its own data dirs, and the Swarm icon (drawn by `scripts/make-icon.swift`). The app menu and "Set Swarm as Default Terminal" use `swarm::APP_NAME`. `scripts/bundle-app.sh` builds Swarm.app with `swarmd`, `swarm-shim` and `swarmctl` inside. `warp-oss` stays untouched.
+
+**Next: replace Warp's interface with the mocked one, piece by piece.** Each row names the Warp view it replaces:
+
+| # | Swarm piece (mockup) | Warp code it replaces or extends |
+|---|---|---|
+| 1 | Title bar: sidebar toggle, window title, "Connect…", "N detached" | workspace header in `workspace/view.rs` (search box "Search sessions, agents, files…", AI/inbox/settings icons) |
+| 2 | Sidebar layout: host groups with counts, state marks, folder/command, last activity, "attached elsewhere" dot, filter, `+`, footer buttons | vertical tabs panel, `workspace/vertical_tabs.rs` |
+| 3 | Tabs layout: host-grouped tab bar with state marks | horizontal tab bar (`workspace/tab_group.rs` and header) |
+| 4 | Session picker popover (host switcher, filter, multi-select, open/terminate) | new view, backed by `swarm-client` |
+| 5 | Thin status bar (host · shell · cwd · size · who else is attached) | new element below the terminal pane |
+| 6 | File / Session / View / Window menus and shortcuts (§9b) | `app/src/app_menus.rs` |
+| 7 | Settings: General, Sessions, Daemon, Hosts; Warp's AI, billing, agents and Drive pages hidden | `app/src/settings_view/` |
+| 8 | First-run sheet (§3a) | replaces Warp's onboarding in `root_view.rs` (currently skipped) |
+| 9 | Menu bar extra | new `NSStatusItem` in `crates/warpui/src/platform/mac` |
+| 10 | Warp's AI, Drive and cloud surfaces off by default; debug-build "Lines: … Size: …" block footer off in Swarm | feature flags / `swarm.rs` |
+
+Order: 1 → 2 → 10 → 4 → 6 → 3 → 5 → 7 → 8 → 9. The title bar and sidebar are the first thing users see, and the picker is what makes detached sessions reachable.
+
 ### What to change in the Warp fork
 1. **Add `daemon_tty::TerminalManager`** as a third implementation of the `TerminalManager` trait, modeled on `remote_tty`. Instead of a websocket it uses `swarm-client` (our protocol over a unix socket or ssh stdio), and it maps `Message::Input` / `Resize` onto `Input` / `Resize` frames. Everything above it (grid, blocks, input editor, rendering) stays unchanged.
    - Select the manager **at runtime** in `pane_group` rather than with the `remote_tty` / `local_tty` cfg. In production every tab uses `daemon_tty`. `local_tty` stays only for tests and as an emergency fallback when no daemon can start.
