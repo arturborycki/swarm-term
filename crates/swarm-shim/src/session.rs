@@ -33,8 +33,14 @@ pub struct Session {
     _child: Mutex<Box<dyn Child + Send + Sync>>,
 }
 
+/// Warp hooks that describe the whole shell session, kept outside the ring so
+/// a replay can still start with them after the ring has dropped them.
+const STICKY_HOOKS: [&str; 2] = ["InitShell", "Bootstrapped"];
+
 struct Inner {
     ring: Ring,
+    /// Latest `InitShell` / `Bootstrapped` hook: (offset, complete bytes).
+    sticky: Vec<(&'static str, u64, Vec<u8>)>,
     scanner: Scanner,
     info: SessionInfo,
     clients: HashMap<u64, Slot>,
@@ -59,6 +65,8 @@ pub struct Attachment {
     pub replay_from: u64,
     pub live_from: u64,
     pub replay: Vec<u8>,
+    /// Session-describing hooks the replay no longer contains, to send first.
+    pub prelude: Vec<(u64, Vec<u8>)>,
     pub exited: Option<(Option<i32>, Option<i32>)>,
     /// The session is in a full-screen app: nudge its size so it repaints.
     pub wants_repaint: bool,
@@ -132,6 +140,7 @@ impl Session {
         let session = Arc::new(Session {
             inner: Mutex::new(Inner {
                 ring: Ring::new(scrollback),
+                sticky: Vec::new(),
                 scanner: Scanner::default(),
                 info,
                 clients: HashMap::new(),
@@ -191,6 +200,26 @@ impl Session {
         for b in ev.boundaries {
             inner.ring.add_boundary(b);
         }
+        for hook in ev.hooks {
+            if hook.name == "Precmd" {
+                // Warp starts a new block here.
+                inner.ring.add_boundary(hook.start);
+            }
+            if let Some(name) = STICKY_HOOKS.iter().find(|n| **n == hook.name) {
+                // `end` stops at the terminator's ESC; the `\` may not be here yet.
+                if let Some(mut bytes) = inner.ring.slice(hook.start, hook.end.min(inner.ring.end())) {
+                    if bytes.last() == Some(&0x1b) {
+                        bytes.push(b'\\');
+                    }
+                    if *name == "InitShell" {
+                        // A new shell epoch (e.g. `exec zsh`): its old snapshot is stale.
+                        inner.sticky.clear();
+                    }
+                    inner.sticky.retain(|(n, _, _)| n != name);
+                    inner.sticky.push((name, hook.start, bytes));
+                }
+            }
+        }
         let mut significant = false;
         if let Some(t) = ev.title {
             significant |= inner.info.title != t;
@@ -247,6 +276,12 @@ impl Session {
         };
         let live_from = inner.ring.end();
         let replay = inner.ring.slice_from(replay_from);
+        let full = matches!(mode, AttachMode::Full) || (matches!(mode, AttachMode::ResumeFrom(o) if !inner.ring.contains(o)));
+        let prelude = if full {
+            inner.sticky.iter().filter(|(_, off, _)| *off < replay_from).map(|(_, off, b)| (*off, b.clone())).collect()
+        } else {
+            Vec::new()
+        };
 
         let (tx, rx) = mpsc::channel(CLIENT_QUEUE);
         let lag = Arc::new(AtomicU64::new(NO_LAG));
@@ -264,7 +299,7 @@ impl Session {
         let wants_repaint = inner.info.alt_screen && exited.is_none() && !readonly && mode == AttachMode::Full;
         self.notify(&mut inner, true);
         let info = self.snapshot(&inner);
-        Attachment { client_id, rx, lag, info, replay_from, live_from, replay, exited, wants_repaint }
+        Attachment { client_id, rx, lag, info, replay_from, live_from, replay, prelude, exited, wants_repaint }
     }
 
     pub fn detach(&self, client_id: u64) {

@@ -237,7 +237,16 @@ Instead of a separate `daemon_tty` manager, the daemon plugs in one level lower,
 - Session metadata written at creation: `created_by=warp`, `warp.session_id`, `warp.shell`, `auto_attach=true`.
 - `scripts/bundle-app.sh` builds the app bundle with `swarmd`, `swarm-shim` and `swarmctl` in `Contents/MacOS`.
 
-Verified: the app opens straight into a terminal whose shell is a `swarmd` session, Warp's bootstrap and blocks work, a command typed from `swarmctl attach` appears as a Warp block, and after quitting the app the session keeps running. **Not built yet:** reopening sessions as tabs on launch (needs the session-id registration, the `InitShell` guard in `PtyController` and the sticky `Bootstrapped` hook from §8a), and all of the Swarm UI.
+**Reopening sessions on launch (built 2026-10-30):**
+- With daemon sessions on, Warp's own window/tab restore is skipped (it would start duplicate shells). At launch the app lists daemon sessions with `created_by=warp`, `auto_attach=true` that are still running, and opens a window with `NewWorkspaceSource::Reattach { tabs }`: one tab per session, ordered by `ui["tab_order"]`, then creation time.
+- Each such tab is an ordinary new terminal tab whose `NewTerminalOptions.env_vars` carries `SWARM_REATTACH_SESSION_ID` and `SWARM_REATTACH_WARP_SESSION_ID`; those already travel to the spawner, so no signatures changed. `on_shell_determined` registers the saved Warp session id instead of a new one and skips the init script; `DaemonSpawner` attaches (`Full`) instead of creating and strips both keys so they never reach a shell; shell recovery gets the env without them.
+- `PtyController::initialize_shell` returns early for re-attached session ids, so the replayed `InitShell` hook updates the model without re-running shell setup. The bridge drops terminal answers to replayed queries.
+- The shim keeps the latest `InitShell` and `Bootstrapped` hooks outside the ring and sends them first on a `Full` replay that starts after them, and treats `Precmd` as a replay boundary (e2e test `replay_keeps_warp_session_hooks_and_starts_at_precmd`).
+- Closing a tab detaches and sets `auto_attach=false` (the session waits in the picker). Quitting the app sets a flag first (`PtySpawner::prepare_for_app_termination`), so tabs detached during quit stay `auto_attach=true`.
+
+Verified in the bundled app: launch → run a command → quit → the session keeps running with `auto_attach=true` → relaunch → the same session comes back as the tab with its earlier blocks rebuilt, no second session, no repeated shell setup, and new commands render as new blocks.
+
+**Known gaps:** after a reattach the prompt's folder shows `/Users/<me>` instead of `~` (the session's home-dir info isn't fully restored), a stray `%` appears in the first replayed block, and replayed block durations are wrong. Tab order isn't recorded yet (`tab_order`), only creation order. The Swarm UI (picker, host groups, first-run sheet, branding) isn't built.
 
 ### What to change in the Warp fork
 1. **Add `daemon_tty::TerminalManager`** as a third implementation of the `TerminalManager` trait, modeled on `remote_tty`. Instead of a websocket it uses `swarm-client` (our protocol over a unix socket or ssh stdio), and it maps `Message::Input` / `Resize` onto `Input` / `Resize` frames. Everything above it (grid, blocks, input editor, rendering) stays unchanged.

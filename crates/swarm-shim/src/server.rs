@@ -90,6 +90,9 @@ async fn handle(session: Arc<Session>, stream: UnixStream, shutdown: Arc<Notify>
                     &ShimMsg::Attached { info: att.info.clone(), replay_from: att.replay_from, live_from: att.live_from },
                 )
                 .await?;
+                for (offset, bytes) in std::mem::take(&mut att.prelude) {
+                    write_frame(&mut wr, &ShimMsg::Output { offset, data: bytes, replay: true }).await?;
+                }
                 send_replay(&mut wr, att.replay_from, &att.replay).await?;
                 att.replay = Vec::new();
                 if let Some((code, signal)) = att.exited {

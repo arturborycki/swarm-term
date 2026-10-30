@@ -1,5 +1,6 @@
 //! Lightweight scan of PTY output for the few things the shim needs to know:
-//! title, cwd, alt-screen state and safe replay boundaries. No grid is kept.
+//! title, cwd, alt-screen state, safe replay boundaries and Warp's shell
+//! hooks. No grid is kept.
 
 use vte::{Params, Parser, Perform};
 
@@ -11,7 +12,22 @@ pub struct ScanEvents {
     pub alt_screen: Option<bool>,
     /// Absolute offsets where replay may start.
     pub boundaries: Vec<u64>,
+    /// Warp lifecycle hooks (`ESC P $ d <hex JSON> ESC \\`) that ended here.
+    pub hooks: Vec<WarpHook>,
 }
+
+/// A Warp shell hook: its name (`InitShell`, `Bootstrapped`, `Precmd`, …) and
+/// where it starts and ends in the output (`end` is just past the ESC of its
+/// terminator; the final `\\` may arrive in the next chunk).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarpHook {
+    pub name: String,
+    pub start: u64,
+    pub end: u64,
+}
+
+/// Enough of the hex payload to read `{"hook": "<name>"`.
+const HOOK_NAME_HEX_PREFIX: usize = 160;
 
 pub struct Scanner {
     parser: Parser,
@@ -26,11 +42,28 @@ impl Default for Scanner {
 
 #[derive(Default)]
 struct Collector {
-    /// Offset of the byte being fed.
+    /// Offset of the byte being fed, and the byte itself.
     pos: u64,
+    byte: u8,
     /// Offset of the ESC that began the current sequence.
     seq_start: u64,
+    /// `seq_start` before the latest ESC: when an `ESC \\` terminator
+    /// triggers a dispatch, the sequence began here.
+    prev_seq_start: u64,
+    /// A Warp DCS hook being received: its start and the hex payload's prefix.
+    dcs: Option<(u64, Vec<u8>)>,
     events: ScanEvents,
+}
+
+impl Collector {
+    /// Start of the sequence being dispatched right now.
+    fn dispatch_start(&self) -> u64 {
+        if self.byte == 0x1b {
+            self.prev_seq_start
+        } else {
+            self.seq_start
+        }
+    }
 }
 
 impl Scanner {
@@ -39,7 +72,9 @@ impl Scanner {
         for (i, b) in bytes.iter().enumerate() {
             let pos = offset + i as u64;
             self.perf.pos = pos;
-            if *b == 0x1b || *b == 0x9b || *b == 0x9d {
+            self.perf.byte = *b;
+            if *b == 0x1b || *b == 0x9b || *b == 0x9d || *b == 0x90 {
+                self.perf.prev_seq_start = self.perf.seq_start;
                 self.perf.seq_start = pos;
             }
             self.parser.advance(&mut self.perf, std::slice::from_ref(b));
@@ -65,9 +100,30 @@ impl Perform for Collector {
             }
             // FinalTerm / iTerm2 / VS Code shell integration: prompt start.
             b"133" if params.get(1).is_some_and(|p| p.first() == Some(&b'A')) => {
-                self.events.boundaries.push(self.seq_start);
+                self.events.boundaries.push(self.dispatch_start());
             }
             _ => {}
+        }
+    }
+
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        if intermediates == b"$" && action == 'd' {
+            self.dcs = Some((self.seq_start, Vec::new()));
+        }
+    }
+
+    fn put(&mut self, byte: u8) {
+        if let Some((_, hex)) = &mut self.dcs {
+            if hex.len() < HOOK_NAME_HEX_PREFIX {
+                hex.push(byte);
+            }
+        }
+    }
+
+    fn unhook(&mut self) {
+        let Some((start, hex)) = self.dcs.take() else { return };
+        if let Some(name) = hook_name(&hex) {
+            self.events.hooks.push(WarpHook { name, start, end: self.pos + 1 });
         }
     }
 
@@ -87,6 +143,20 @@ impl Perform for Collector {
             self.events.boundaries.push(self.pos + 1);
         }
     }
+}
+
+/// Reads the hook name from the start of a hex-encoded `{"hook": "<name>", …}`.
+fn hook_name(hex: &[u8]) -> Option<String> {
+    let even = &hex[..hex.len() & !1];
+    let bytes: Vec<u8> = even
+        .chunks(2)
+        .map_while(|p| std::str::from_utf8(p).ok().and_then(|h| u8::from_str_radix(h, 16).ok()))
+        .collect();
+    let text = String::from_utf8_lossy(&bytes);
+    let rest = &text[text.find("\"hook\"")? + 6..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// `file://host/path%20with%20spaces` -> `/path with spaces`.
@@ -127,6 +197,45 @@ mod tests {
         let mut s = Scanner::default();
         let ev = s.feed(100, b"out\r\n\x1b]133;A\x07$ ");
         assert_eq!(ev.boundaries, vec![105]);
+    }
+
+    #[test]
+    fn st_terminated_prompt_marker_points_at_its_own_start() {
+        let mut s = Scanner::default();
+        let ev = s.feed(10, b"ab\x1b]133;A\x1b\\$ ");
+        assert_eq!(ev.boundaries, vec![12]);
+    }
+
+    fn warp_hook(json: &str) -> Vec<u8> {
+        let hex: String = json.bytes().map(|b| format!("{b:02x}")).collect();
+        let mut v = b"\x1bP$d".to_vec();
+        v.extend(hex.into_bytes());
+        v.extend(b"\x1b\\");
+        v
+    }
+
+    #[test]
+    fn warp_hooks_are_named_and_located() {
+        let mut s = Scanner::default();
+        let mut out = b"xy".to_vec();
+        let precmd = warp_hook(r#"{"hook": "Precmd", "value": {"session_id": 7}}"#);
+        out.extend(&precmd);
+        // Split mid-payload to cover chunk boundaries.
+        let (a, b) = out.split_at(20);
+        let mut hooks = s.feed(100, a).hooks;
+        hooks.extend(s.feed(100 + a.len() as u64, b).hooks);
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].name, "Precmd");
+        assert_eq!(hooks[0].start, 102);
+        // end is just past the terminator's ESC.
+        assert_eq!(hooks[0].end, 102 + precmd.len() as u64 - 1);
+    }
+
+    #[test]
+    fn other_dcs_sequences_are_ignored() {
+        let mut s = Scanner::default();
+        let ev = s.feed(0, b"\x1bP1$r0m\x1b\\");
+        assert!(ev.hooks.is_empty());
     }
 
     #[test]

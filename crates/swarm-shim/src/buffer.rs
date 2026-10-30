@@ -74,6 +74,16 @@ impl Ring {
         offset >= self.start && offset <= self.end()
     }
 
+    /// Bytes in `start..end`, if all of them are still buffered.
+    pub fn slice(&self, start: u64, end: u64) -> Option<Vec<u8>> {
+        if start < self.start || end > self.end() || start > end {
+            return None;
+        }
+        let from = (start - self.start) as usize;
+        let to = (end - self.start) as usize;
+        Some(self.data.range(from..to).copied().collect())
+    }
+
     /// Bytes from `offset` to the end. `offset` must satisfy `contains`.
     pub fn slice_from(&self, offset: u64) -> Vec<u8> {
         let skip = (offset.saturating_sub(self.start)) as usize;

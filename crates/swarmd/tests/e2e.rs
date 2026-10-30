@@ -400,3 +400,48 @@ async fn missing_cwd_falls_back_to_home() {
     a.input(b"echo \"cwd=$(pwd)\"\n".to_vec()).await.unwrap();
     read_until(&mut a, &format!("cwd={home}")).await;
 }
+
+fn hex(s: &str) -> String {
+    s.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+#[tokio::test]
+async fn replay_keeps_warp_session_hooks_and_starts_at_precmd() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let info = c.create(sh_opts("hooks")).await.unwrap();
+    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    let init = hex(r#"{"hook": "InitShell", "value": {"session_id": 42}}"#);
+    let boot = hex(r#"{"hook": "Bootstrapped", "value": {"session_id": 42}}"#);
+    let precmd = hex(r#"{"hook": "Precmd", "value": {"session_id": 42}}"#);
+    let p = r"printf '\033P$d%s\033\\'";
+    let script = format!(
+        "{p} {init}; {p} {boot}; head -c 17000000 /dev/zero | tr '\\0' x; {p} {precmd}; echo; echo flood-$((1+1))\n"
+    );
+    a.input(script.into_bytes()).await.unwrap();
+    read_until(&mut a, "flood-2\r\n").await;
+    a.detach().await.unwrap();
+
+    let mut b = c.attach(&info.id, AttachMode::Full, None, false).await.unwrap();
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    let mut total = 0usize;
+    timeout(Duration::from_secs(10), async {
+        while let Some(ev) = b.recv().await {
+            if let StreamEvent::Output { data, replay: true, .. } = ev {
+                total += data.len();
+                chunks.push(data);
+                if String::from_utf8_lossy(chunks.last().unwrap()).contains("flood-2\r\n") {
+                    return;
+                }
+            }
+        }
+    })
+    .await
+    .expect("replay did not finish");
+    let starts = |c: &[u8], hex: &str| c.starts_with(format!("\x1bP$d{hex}\x1b\\").as_bytes());
+    assert!(starts(&chunks[0], &init), "first replayed chunk must be the kept InitShell hook");
+    assert!(starts(&chunks[1], &boot), "second replayed chunk must be the kept Bootstrapped hook");
+    assert!(total < 64 * 1024, "replay should start at the Precmd boundary, got {total} bytes");
+    let rest: Vec<u8> = chunks[2..].concat();
+    assert!(rest.starts_with(format!("\x1bP$d{precmd}").as_bytes()), "replay must start at the Precmd hook");
+}
