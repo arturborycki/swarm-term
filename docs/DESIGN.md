@@ -216,6 +216,29 @@ A session can be attached from several clients (laptop GUI + `swarmctl` over ssh
 
 **Not reusable for us.** Warp's `remote_server` crate is a protocol for code, diff and repo features on SSH hosts. It doesn't hold PTYs.
 
+### Swarm is its own app, built on Warp's engine (decided 2026-10-30)
+
+We use Warp's engine (terminal model, blocks, input editor, renderer, shell integration) but the product is **Swarm**, not Warp: its own name and icon, and the look from the mockups (§9b). In the fork that means:
+- no Warp welcome, onboarding or login screen (done: `app/src/swarm.rs`, `SKIP_WARP_ONBOARDING`); Warp's cloud sign-in, Drive and agent features are off or opt-in;
+- Swarm's first-run sheet (§3a) instead of Warp's onboarding;
+- the host-grouped tab bar and the sidebar layout, session-state marks, the session picker, the connect-to-host sheet, the menus and the menu bar extra exactly as mocked, replacing Warp's equivalents;
+- Swarm's Settings window with the General / Sessions / Daemon / Hosts panes;
+- bundle name, bundle id, icon and window titles say Swarm, never Warp.
+
+Fork-specific code lives in `app/src/swarm*` and `crates/warp_terminal/src/local_tty/daemon.rs` where possible, so the diff against upstream stays small and easy to find.
+
+### How sessions reach the daemon (built 2026-10-30)
+
+Instead of a separate `daemon_tty` manager, the daemon plugs in one level lower, at `PtySpawner`. A separate manager would have to re-implement the ~1,500 lines of `local_tty` (shell detection, init script, recovery, banners). Building at the spawner means everything above it runs unchanged:
+- `PtySpawner::spawn_pty` first asks `local_tty::daemon::DaemonSpawner`. That builds exactly the command upstream would spawn (`build_host_shell_command`), creates a `swarmd` session with that argv/env/cwd, attaches, and returns **one end of a socket pair as the "leader fd"**. A bridge task on a small tokio runtime moves bytes between the other end and the attachment. If the daemon can't be reached, Warp spawns the shell itself as before. `SWARM_DAEMON=0` turns the daemon off.
+- `PtyHandle` gained `resize()`. `Pty::on_resize` uses it instead of `TIOCSWINSZ`, which fails on a socket.
+- The daemon reports the child's exit; the bridge stores the status for `process_termination_status` and sends `SIGCHLD` to the app, which is how Warp notices exits.
+- `PtyHandle::kill` only **detaches**, so closing a tab or quitting leaves the session running (§8, item 6).
+- Session metadata written at creation: `created_by=warp`, `warp.session_id`, `warp.shell`, `auto_attach=true`.
+- `scripts/bundle-app.sh` builds the app bundle with `swarmd`, `swarm-shim` and `swarmctl` in `Contents/MacOS`.
+
+Verified: the app opens straight into a terminal whose shell is a `swarmd` session, Warp's bootstrap and blocks work, a command typed from `swarmctl attach` appears as a Warp block, and after quitting the app the session keeps running. **Not built yet:** reopening sessions as tabs on launch (needs the session-id registration, the `InitShell` guard in `PtyController` and the sticky `Bootstrapped` hook from §8a), and all of the Swarm UI.
+
 ### What to change in the Warp fork
 1. **Add `daemon_tty::TerminalManager`** as a third implementation of the `TerminalManager` trait, modeled on `remote_tty`. Instead of a websocket it uses `swarm-client` (our protocol over a unix socket or ssh stdio), and it maps `Message::Input` / `Resize` onto `Input` / `Resize` frames. Everything above it (grid, blocks, input editor, rendering) stays unchanged.
    - Select the manager **at runtime** in `pane_group` rather than with the `remote_tty` / `local_tty` cfg. In production every tab uses `daemon_tty`. `local_tty` stays only for tests and as an emergency fallback when no daemon can start.

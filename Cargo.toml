@@ -7,6 +7,8 @@ members = [
     "crates/swarmd",
     "crates/swarmctl",
 ]
+# The Warp fork is its own workspace.
+exclude = ["app"]
 
 [workspace.package]
 version = "0.1.0"

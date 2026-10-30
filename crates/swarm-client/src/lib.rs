@@ -374,3 +374,84 @@ async fn start_local_daemon() -> Result<()> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Replay hygiene
+
+/// Removes what a terminal sends in answer to queries (device attributes,
+/// cursor position and mode reports, OSC color and DCS replies) and keeps
+/// everything the user typed.
+pub fn strip_terminal_responses(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] == 0x1b {
+            if let Some(len) = response_len(&data[i..]) {
+                i += len;
+                continue;
+            }
+        }
+        out.push(data[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Length of the terminal response starting at `s[0] == ESC`, if it is one.
+fn response_len(s: &[u8]) -> Option<usize> {
+    match s.get(1)? {
+        b'[' => {
+            // CSI [?>=]params [$] final, where the final marks a report:
+            // c (DA), R (CPR), n (DSR), y (DECRPM), t (window ops), u (kitty keys).
+            let mut j = 2;
+            let private = matches!(s.get(j), Some(b'?' | b'>' | b'='));
+            if private {
+                j += 1;
+            }
+            while matches!(s.get(j), Some(b'0'..=b'9' | b';' | b':')) {
+                j += 1;
+            }
+            if s.get(j) == Some(&b'$') {
+                j += 1;
+            }
+            let fin = *s.get(j)?;
+            let report = matches!(fin, b'c' | b'n' | b'y' | b't' | b'R') || (private && fin == b'u');
+            // A bare ESC [ R would be a key, not a report.
+            (report && j > 2).then_some(j + 1)
+        }
+        // OSC and DCS replies, terminated by BEL or ST.
+        b']' | b'P' => {
+            let mut j = 2;
+            while j < s.len() {
+                if s[j] == 0x07 {
+                    return Some(j + 1);
+                }
+                if s[j] == 0x1b && s.get(j + 1) == Some(&b'\\') {
+                    return Some(j + 2);
+                }
+                j += 1;
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::strip_terminal_responses as strip;
+
+    #[test]
+    fn keeps_typing_and_keys() {
+        assert_eq!(strip(b"ihello\x1b"), b"ihello\x1b");
+        assert_eq!(strip(b"\x1b[A\x1b[1;5D:wq\r"), b"\x1b[A\x1b[1;5D:wq\r");
+    }
+
+    #[test]
+    fn drops_responses() {
+        assert_eq!(strip(b"\x1b[?62;22cab\x1b[24;80R"), b"ab");
+        assert_eq!(strip(b"x\x1b]11;rgb:0000/0000/0000\x07y"), b"xy");
+        assert_eq!(strip(b"\x1bP>|xterm(390)\x1b\\z"), b"z");
+        assert_eq!(strip(b"\x1b[?2004;1$yq"), b"q");
+    }
+}
