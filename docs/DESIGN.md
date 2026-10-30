@@ -296,6 +296,9 @@ Warp's UI framework (`warpui`, MIT) on macOS renders with **Metal** and already 
 - **"N detached"** opens the session picker for detached sessions (§8, item 6).
 - **Thin status bar** (optional, on by default): host, shell, cwd, size, and who else is attached.
 - Tabs can be dragged into their own window and back; every window shows the same kind of tab bar.
+- **Two layouts for open sessions**, switched with the sidebar button in the title bar, View → Sessions as Sidebar (Ctrl+Cmd+S), or a setting for the default:
+  - **Tabs** (default): the host-grouped tab bar above.
+  - **Sidebar** (like Warp's vertical tabs): the tab bar is hidden and a left panel lists every open session, grouped by host with collapsible headers and counts. Each row shows the state mark, name, folder or running command, last activity, and the "attached elsewhere" dot. The panel has a filter field, a `+` for a new session, and "N detached" / "Connect…" buttons at the bottom. Clicking a row shows that session's terminal on the right. The panel can be resized and hidden; the choice is remembered per window.
 
 ### Session states (the visual language)
 Each state uses a **shape and a color**, never color alone, so it works for color-blind users and in grayscale.
@@ -333,7 +336,7 @@ A popover from "N detached", from the host group's menu, or with **Cmd+O**. It's
 |---|---|
 | **File** | New Session (Cmd+T), New Session on Host ▸, Open Session… (Cmd+O), Connect to Host… (Cmd+Shift+K), Detach Tab (Cmd+W), Terminate Session… (Cmd+Shift+W), Close Window |
 | **Session** | Rename… , Tab Color ▸, Restart (when exited), Attach Read-Only, Copy Attach Command, Show Session Info (Cmd+I) |
-| **View** | Show Status Bar, Collapse Host Groups, Warp's existing view items |
+| **View** | Sessions as Sidebar (Ctrl+Cmd+S), Show Status Bar, Collapse Host Groups, Warp's existing view items |
 | **Window** | Standard items, plus a list of tabs grouped by host; Move Tab to New Window |
 
 Cmd+N follows the "window ⇒ tab" decision (§8, item 4): it creates a new session tab in the front window. Every Warp default shortcut is audited against this table and macOS conventions before M2 ships.
