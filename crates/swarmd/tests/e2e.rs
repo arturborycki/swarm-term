@@ -216,7 +216,7 @@ async fn two_clients_see_the_same_output() {
     let mut a = c1.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
     let mut b = c2.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
     let listed = c1.list().await.unwrap();
-    assert_eq!(listed[0].clients.len(), 2);
+    assert_eq!(listed[0].clients.len(), 2, "attach must be reflected in the list right away");
     a.input(b"echo both-$((2*3))\n".to_vec()).await.unwrap();
     read_until(&mut a, "both-6").await;
     read_until(&mut b, "both-6").await;
@@ -385,4 +385,18 @@ async fn tracks_title_cwd_and_alt_screen() {
     .await
     .expect("info not updated");
     assert_eq!(s.cwd.as_deref(), Some("/tmp/a b"));
+}
+
+#[tokio::test]
+async fn missing_cwd_falls_back_to_home() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let mut opts = sh_opts("nocwd");
+    opts.cwd = Some("/definitely/not/here".into());
+    let info = c.create(opts).await.unwrap();
+    let home = std::env::var("HOME").unwrap();
+    assert_eq!(info.cwd.as_deref(), Some(home.as_str()));
+    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    a.input(b"echo \"cwd=$(pwd)\"\n".to_vec()).await.unwrap();
+    read_until(&mut a, &format!("cwd={home}")).await;
 }

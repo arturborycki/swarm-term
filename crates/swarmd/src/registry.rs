@@ -167,6 +167,12 @@ impl Registry {
         Ok(())
     }
 
+    fn refresh(&self, info: &SessionInfo) {
+        if let Some(slot) = self.sessions.lock().unwrap().get_mut(&info.id) {
+            *slot = info.clone();
+        }
+    }
+
     fn forget(&self, id: &str) {
         if self.sessions.lock().unwrap().remove(id).is_some() {
             let _ = self.events.send(SessionEvent::Removed { id: id.to_string() });
@@ -199,6 +205,9 @@ impl Registry {
         write_frame(&mut stream, &ShimRequest::Attach { client, mode, size }).await?;
         match read_frame::<_, ShimMsg>(&mut stream).await? {
             Some(ShimMsg::Attached { info, replay_from, live_from }) => {
+                // The shim's info now counts this client; don't wait for the
+                // watch connection to deliver it.
+                self.refresh(&info);
                 Ok(ShimAttachment { stream, info, replay_from, live_from })
             }
             other => bail!("unexpected attach reply {other:?}"),

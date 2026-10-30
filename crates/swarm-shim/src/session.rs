@@ -86,7 +86,10 @@ impl Session {
             c
         };
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-        cmd.cwd(opts.cwd.clone().unwrap_or(home));
+        // A folder that doesn't exist here (e.g. sent from another machine)
+        // falls back to home instead of failing the session.
+        let cwd = opts.cwd.clone().filter(|d| std::path::Path::new(d).is_dir()).unwrap_or(home);
+        cmd.cwd(&cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("SWARM_SESSION_ID", id);
@@ -108,7 +111,7 @@ impl Session {
             id: id.to_string(),
             name: opts.name.clone(),
             title: String::new(),
-            cwd: opts.cwd.clone(),
+            cwd: Some(cwd),
             command,
             pid,
             foreground: None,

@@ -84,6 +84,12 @@ enum DaemonCmd {
     Start,
     /// Stop the daemon; sessions keep running.
     Stop,
+    /// Start the daemon at login (launchd agent / systemd user unit).
+    InstallService,
+    /// Start the daemon only when needed again.
+    UninstallService,
+    /// Show whether the daemon starts at login.
+    ServiceStatus,
 }
 
 fn parse_kv(s: &str) -> Result<(String, String), String> {
@@ -113,6 +119,17 @@ async fn connect(host: &Option<String>) -> Result<Client> {
 
 async fn run(cli: Cli) -> Result<i32> {
     let cmd = cli.cmd.unwrap_or(Cmd::Ls);
+    let remote = cli.host.is_some();
+    if let Cmd::Daemon { cmd: c @ (DaemonCmd::InstallService | DaemonCmd::UninstallService | DaemonCmd::ServiceStatus) } =
+        &cmd
+    {
+        let args = match c {
+            DaemonCmd::InstallService => "service install",
+            DaemonCmd::UninstallService => "service uninstall",
+            _ => "service status",
+        };
+        return service(&cli.host, args).await;
+    }
     let client = connect(&cli.host).await?;
     match cmd {
         Cmd::Ls => {
@@ -120,7 +137,13 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::New { name, cwd, detached, command } => {
-            let cwd = cwd.or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()));
+            // A local folder means nothing on another host: start in its home there.
+            let cwd = cwd.or_else(|| {
+                if remote {
+                    return None;
+                }
+                std::env::current_dir().ok().map(|p| p.display().to_string())
+            });
             let mut ui = BTreeMap::new();
             ui.insert("created_by".into(), "swarmctl".into());
             let opts = CreateOpts { command, cwd, env: Vec::new(), size: terminal_size(), name, ui };
@@ -175,8 +198,28 @@ async fn run(cli: Cli) -> Result<i32> {
                 println!("swarmd stopped; sessions keep running");
                 Ok(0)
             }
+            DaemonCmd::InstallService | DaemonCmd::UninstallService | DaemonCmd::ServiceStatus => unreachable!(),
         },
     }
+}
+
+/// Runs `swarmd service ...` here or on `host` (it manages the login
+/// service of the machine it runs on).
+async fn service(host: &Option<String>, args: &str) -> Result<i32> {
+    let mut cmd = match host {
+        Some(h) => {
+            let mut c = tokio::process::Command::new("ssh");
+            c.args(["-o", "BatchMode=yes", h, &swarm_client::remote_swarmd_command(args)]);
+            c
+        }
+        None => {
+            let mut c = tokio::process::Command::new(swarm_client::daemon_exe());
+            c.args(args.split(' '));
+            c
+        }
+    };
+    let status = cmd.status().await.context("run swarmd service")?;
+    Ok(status.code().unwrap_or(1))
 }
 
 async fn find(client: &Client, query: &str) -> Result<SessionInfo> {

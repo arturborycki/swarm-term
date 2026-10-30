@@ -67,11 +67,12 @@ In both modes the daemon is never a child of the app, and quitting the app never
 The local mode is chosen on first run (§3a) and changeable in Settings → Daemon. Each remote host has its own mode, set in its host settings (§9).
 
 ### Daemon startup (mechanics)
-1. Client (GUI, `swarmctl`, or `swarmd bridge`) tries `$RUNTIME_DIR/swarm/swarmd.sock`.
-2. If absent: spawns `swarmd --daemonize` (double-fork + `setsid`, stdio → log file, own process group). This happens in both modes, as a fallback in `at-login` mode in case the service is not running.
-3. `at-login` is installed/removed by `swarmctl service install|uninstall`, which the GUI calls when the setting changes. It writes `~/Library/LaunchAgents/dev.swarm.swarmd.plist` (macOS) or `~/.config/systemd/user/swarmd.service` (Linux). Both are user-level and need no admin rights. On Linux the unit uses `KillMode=process` so a daemon restart never kills shims.
+1. Client (GUI, `swarmctl`, or `swarmd bridge`) tries `$RUNTIME_DIR/swarmd.sock`.
+2. If absent: runs `swarmd start`, which spawns `swarmd run` with `setsid`, stdin/stdout → `/dev/null`, stderr → `swarmd.log`, and waits until the socket answers. This happens in both modes, as a fallback in `at-login` mode in case the service is not running.
+3. `at-login` is installed/removed by `swarmd service install|uninstall|status` (`swarmctl daemon install-service` / `uninstall-service` call it; the GUI will too). It writes `~/Library/LaunchAgents/dev.swarm.swarmd.plist` (macOS) or `~/.config/systemd/user/dev.swarm.swarmd.service` (Linux), both running `swarmd run --if-not-running`. Both are user-level and need no admin rights. launchd restarts the daemon only after a crash (`KeepAlive.SuccessfulExit = false`), not after `swarmd stop`; systemd uses `Restart=on-failure` and `KillMode=process` so a daemon restart never kills shims. `SWARM_RUNTIME_DIR` / `SWARM_STATE_DIR` set at install time are written into the service. Once the app ships as a bundle, macOS registration moves to `SMAppService` (§9b); the CLI path stays for headless and remote Macs.
 4. **Linux remote hosts:** sessions only survive the user's ssh logout if systemd does not kill the user's processes at logout. `loginctl enable-linger` keeps them alive. On most systems a user can enable it for themselves; if the host forbids it, the GUI shows "Sessions on this host will end when you log out" instead of failing silently. In `with-app` mode the daemon is started via `setsid` from the ssh session, which survives logout unless the host sets `KillUserProcesses=yes`; the same check and warning apply.
-5. Single-instance guaranteed by an `flock` on `$STATE_DIR/swarmd.lock`.
+5. Single-instance guaranteed by an `flock` on `$RUNTIME_DIR/swarmd.lock`. `swarmd run --if-not-running` exits 0 when the lock is held.
+6. `swarmd run` and every shim close all inherited file descriptors above stderr as their first action, so a long-lived process never keeps its starter's pipes or terminal open.
 
 ### 3a. First run
 
@@ -115,32 +116,40 @@ struct SessionInfo {
 
 ## 5. Wire protocol
 
-- Transport: a byte stream (unix socket locally; ssh stdio remotely). Framing: `u32 length | u8 kind | payload`, payload encoded with `postcard` (serde). A version handshake is the first frame.
-- One connection multiplexes control and N attached sessions (`stream_id` per attachment), so a remote host needs only one ssh channel.
+As built in `crates/swarm-proto` (protocol version 1).
 
-### Control (client ⇄ swarmd)
-```
-Hello { proto_version, client_name, client_id }   → Welcome { daemon_version, host_info }
-ListSessions                                       → Sessions(Vec<SessionInfo>)
-Subscribe                                          → stream of SessionEvent (created/exited/renamed/title/cwd/attached)
-CreateSession { shell?, cwd?, env, size, name?, ui } → Created(SessionInfo)
-KillSession { id, signal }
-RenameSession / SetUiHints { id, … }
-Attach { id, mode: Full | ResumeFrom(offset), size, readonly } → Attached { stream_id, … }
-Detach { stream_id }
-```
+- Transport: a byte stream (unix socket locally; `ssh host swarmd bridge` stdio remotely). Framing: big-endian `u32` length, then a `postcard`-encoded message (max 16 MiB). The first frames are `Hello` / `Welcome`; a protocol mismatch closes the connection.
+- One client connection multiplexes requests (with request ids), an event subscription and any number of attachments (`stream` id each), so a remote host needs only one ssh channel.
 
-### Per attachment (client ⇄ shim, relayed by swarmd)
+### Client ⇄ swarmd
 ```
-→ Input(bytes)                 keystrokes / paste, raw
-→ Resize { cols, rows, px }    see §7
-← Snapshot { … }               only when the session is in alt-screen (see §6)
-← Output { offset, bytes }     raw PTY bytes, monotonically increasing offset
-← Exited { code }
-← Lagged { resume_at }         client fell too far behind; it must re-attach
+ClientMsg::Hello { proto, client_name, client_id }      → ServerMsg::Welcome { proto, daemon_version, hostname, os }
+Request::Ping                                           → Pong
+Request::List                                           → Sessions(Vec<SessionInfo>)
+Request::Create(CreateOpts)                             → Session(SessionInfo)      (empty command = login shell)
+Request::Kill { id, signal }                            → Ok
+Request::Remove { id }                                  → Ok   (SIGHUP, then SIGKILL after 3 s; returns once the session is gone)
+Request::SetMeta { id, MetaUpdate { name, ui } }        → Session(SessionInfo)      (ui keys with "" values are removed)
+Request::Attach { id, mode, size, readonly }            → Attached { stream, info, replay_from, live_from }
+Request::Subscribe                                      → Ok, then ServerMsg::Event(Created | Updated | Removed)
+Request::Shutdown                                       → Ok   (daemon exits; sessions keep running)
 ```
+`AttachMode` is `Full` (replay from the oldest buffered boundary), `ResumeFrom(offset)` (falls back to `Full` if no longer buffered) or `Live`.
 
-`swarmd` relays attachment traffic by splicing the client stream to the shim socket; it does not parse it.
+### Per attachment (relayed by swarmd)
+```
+→ ClientMsg::Input { stream, data }    keystrokes / paste, raw
+→ ClientMsg::Resize { stream, size }   see §7
+→ ClientMsg::Detach { stream }
+← ServerMsg::Output { stream, offset, data, replay }   raw PTY bytes; replay = true for buffered history
+← ServerMsg::Exited { stream, code, signal }
+← ServerMsg::Lagged { stream, resume_at }              client fell behind; re-attach with ResumeFrom(resume_at)
+← ServerMsg::StreamClosed { stream, reason }
+```
+A `Snapshot` message for full-screen apps (§6) is not implemented yet (M4).
+
+### swarmd ⇄ shim
+Each request opens its own connection to `$RUNTIME_DIR/shims/<id>.sock`: `Info`, `Watch` (the shim pushes `Changed(SessionInfo)` on every significant change, and activity-only changes at most once a second), `Attach` (then `ShimInput` one way and output messages the other), `Kill`, `Remove`, `SetMeta`. The shim owns all session metadata, including name and UI hints, so `swarmd` keeps no state of its own: on start it scans `shims/` and re-adopts every shim that answers, deleting stale sockets. `swarmd` relays attachment frames between the client connection and the shim connection without interpreting the bytes.
 
 ## 6. Output, scrollback and reattach — the core problem
 
@@ -150,13 +159,17 @@ Warp's blocks, prompt detection and input editor depend on **escape sequences em
 
 Each shim keeps:
 1. **Raw ring buffer** of PTY output (default 16 MB, configurable per session) addressed by a global `u64` byte offset.
-2. **Boundary index**: offsets of safe replay start points — every shell-integration "prompt start / block start" marker plus every alt-screen exit. Detected with a lightweight `vte` scanner (no full emulation needed for this).
-3. **Server-side terminal model** (upstream `alacritty_terminal`, the same code Warp's grid model was derived from; we use upstream rather than Warp's AGPL-licensed copy, see §14) used for two things only: knowing whether we're in alt-screen, and producing a screen snapshot for full-screen apps.
+2. **Boundary index**: offsets of safe replay start points, found by a lightweight `vte` scan (no full emulation). Built so far: offset 0, OSC 133;A prompt-start markers (pointing at the ESC that begins them) and the byte after every alt-screen exit. Warp's own block markers are added in M2. The same scan tracks the title (OSC 0/2), cwd (OSC 7) and alt-screen state.
+3. **Server-side terminal model** (planned, M4) (upstream `alacritty_terminal`, the same code Warp's grid model was derived from; we use upstream rather than Warp's AGPL-licensed copy, see §14) used for two things only: knowing whether we're in alt-screen, and producing a screen snapshot for full-screen apps.
 
 Reattach algorithm (`Attach { mode: Full }`):
 - **Normal (primary screen) case:** pick the oldest boundary still inside the ring buffer → send `Output` from there. Warp's parser replays the bytes and reconstructs the blocks exactly as if it had been attached the whole time. Older history beyond the ring is lost (shown as "earlier output truncated").
-- **Alt-screen case (vim, htop, less):** replay the primary-screen history up to the alt-screen enter boundary, then send a `Snapshot` of the current alt screen (cells + attributes + cursor + modes), then live bytes. The app can also send a resize-nudge (SIGWINCH via size ±1 and back) to force the app to repaint, as a fallback.
+- **Alt-screen case (vim, htop, less):** replay the primary-screen history up to the alt-screen enter boundary, then send a `Snapshot` of the current alt screen (cells + attributes + cursor + modes), then live bytes. *Built so far:* the full replay (which still contains the alt-screen enter while it's buffered) plus a repaint nudge: on a `Full`, non-read-only attach to a session in alt-screen, the shim shrinks the PTY by one row for 50 ms and restores it, so the app redraws. Verified with vim and htop. The snapshot covers the case where the alt-screen enter has scrolled out of the buffer.
 - **Network blip (`ResumeFrom(offset)`):** if `offset` is still in the ring, send only the delta — no visual reset at all. This makes remote reconnects seamless.
+
+**Replay must not be answered.** Replayed output can contain terminal queries (device attributes, cursor position, colors). The attaching terminal answers them, and those answers must not reach the live program. `swarmctl` drops terminal-response sequences (CSI reports ending in `c`, `n`, `y`, `t`, `R`, private `u`; OSC and DCS replies) from its input for 250 ms after the last replayed chunk, and passes everything else, so typing right after attaching works. The GUI does the same at the model level by marking replay frames (§8a).
+
+**Exit.** When the child exits, the shim waits up to 500 ms for the PTY reader to drain, so `Exited` always follows the final output, then keeps the buffer for 10 minutes (or until `Remove`) before it exits and removes its socket.
 
 Backpressure: the shim's PTY reader never blocks on clients. Each client has a bounded queue; if it overflows the client gets `Lagged` and re-attaches with `ResumeFrom`. A slow/remote client can never stall the shell.
 
@@ -411,29 +424,33 @@ To meet the reattach budget, the client **renders the tail first**: the shim sen
 | logging | `tracing` + rolling file appender |
 | ssh (later, optional) | `russh` |
 
-Repo layout (cargo workspace):
+Repo layout (cargo workspace, as built):
 ```
 crates/
-  swarm-proto/    protocol types, framing, version negotiation
-  swarm-shim/     per-session PTY holder, ring buffer, boundary index, snapshot
-  swarmd/         supervisor, registry, client server, ssh bridge subcommand
+  swarm-proto/    protocol types, framing, shared runtime/state/log paths
+  swarm-shim/     library: per-session PTY holder, ring buffer, boundary scan, replay
+  swarmd/         the daemon binary `swarmd` and the shim binary `swarm-shim`
+                  (a thin main over the swarm-shim library), plus e2e tests
   swarmctl/       CLI
   swarm-client/   async client library used by both swarmctl and the GUI
-app/              the Warp fork (git subtree or separate repo pinned by commit)
+scripts/          interactive-check.exp: drives swarmctl with vim/htop in a real pty
+app/              the Warp fork (M2; git subtree or separate repo pinned by commit)
 ```
 
 ## 12. Roadmap
 
 | Milestone | Scope | Exit criteria |
 |---|---|---|
-| **M0 – spike** | shim + `swarmctl attach` with raw passthrough (dtach-equivalent) | Run vim/htop, detach, reattach from another terminal |
-| **M1 – daemon** | `swarmd` registry, protocol v1, multi-client, ring buffer, boundary replay, `ResumeFrom`, daemon restart re-adopts shims | Kill `swarmd`, sessions survive and re-appear |
-| **D – UI design** (in parallel with M0–M1) | Clickable mockups of main window, session states, picker, connect sheet, menus, menu bar extra, settings, first run (§9b) | Mockups reviewed and agreed before M2 starts |
+| **M0 – spike** ✅ | shim + `swarmctl attach` with raw passthrough (dtach-equivalent) | Run vim/htop, detach, reattach from another terminal |
+| **M1 – daemon** ✅ | `swarmd` registry, protocol v1, multi-client, read-only attach, latest-active sizing, ring buffer, boundary replay, `ResumeFrom`, daemon restart re-adopts shims, `at-login` service (launchd / systemd) | Kill `swarmd`, sessions survive and re-appear |
+| **D – UI design** ✅ (in parallel with M0–M1) | Clickable mockups of main window, session states, picker, connect sheet, menus, menu bar extra, settings, first run (§9b) | Mockups reviewed and agreed before M2 starts |
 | **M2 – GUI local** | Warp fork with `daemon_tty` `TerminalManager`, runtime manager selection, replay guard, idempotent bootstrap, startup restore, window⇒tab, close/detach semantics, first-run sheet, start-mode setting (`with-app` / `at-login` via `SMAppService`), host-grouped tab bar, session-state indicators, local session picker, menus and shortcuts, Settings window, menu bar extra | Quit app with 5 tabs, reopen, identical blocks restored; §9b performance budgets met; UI checklist passes |
 | **M3 – remote** | `swarmd bridge`, ssh transport, provisioning for Linux and macOS hosts, per-host start mode, session picker dropdown, reconnect | Laptop sleep/wake against remote host resumes without visual reset |
-| **M4 – polish** | alt-screen snapshots, tab drag-out, size policies, readonly attach, notifications and Dock badge, Sparkle updates, signed/notarized DMG and Homebrew cask, optional "restore after reboot" (recreate sessions with the same name/cwd/tab order, without the processes) | — |
+| **M4 – polish** | alt-screen snapshots, tab drag-out, `smallest` size policy, notifications and Dock badge, Sparkle updates, signed/notarized DMG and Homebrew cask, optional "restore after reboot" (recreate sessions with the same name/cwd/tab order, without the processes) | — |
 
 M0–M1 are independent of Warp and de-risk the hard part; M2 is where most of the unknowns are.
+
+**Status (2026-10-30):** M0, M1 and D are done on branch `feat/daemon-core`. M0–M1 are covered by end-to-end tests against real daemons, shims and shells (`crates/swarmd/tests/e2e.rs`) and by `scripts/interactive-check.exp` (vim and htop in a real pty, across a daemon restart). Verified on macOS (arm64) and Linux (Ubuntu, arm64, via OrbStack), including the `ssh host swarmd bridge` path. Next: M2, starting with an unchanged build of the Warp fork and the shell-integration spike (§13, risk 2).
 
 ## 13. Risks
 

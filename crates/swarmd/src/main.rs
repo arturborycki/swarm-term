@@ -2,6 +2,7 @@
 
 mod registry;
 mod server;
+mod service;
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
@@ -27,7 +28,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Run the daemon in the foreground.
-    Run,
+    Run {
+        /// Exit quietly if another daemon already runs (used by login services).
+        #[arg(long)]
+        if_not_running: bool,
+    },
     /// Start the daemon in the background if it isn't running.
     Start,
     /// Stop the daemon. Sessions keep running and are re-adopted on next start.
@@ -36,16 +41,40 @@ enum Cmd {
     Status,
     /// Start the daemon if needed and connect stdin/stdout to it (used over ssh).
     Bridge,
+    /// Start the daemon at login (`at-login` mode) or only when needed (`with-app`).
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Start the daemon at login: launchd agent (macOS) or systemd user unit (Linux).
+    Install {
+        /// On Linux, don't turn on lingering (sessions may end at logout).
+        #[arg(long)]
+        no_linger: bool,
+    },
+    /// Go back to starting the daemon only when needed.
+    Uninstall,
+    /// Show the current start mode.
+    Status,
 }
 
 fn main() {
     let cli = Cli::parse();
     let result = match cli.cmd {
-        Cmd::Run => run(),
+        Cmd::Run { if_not_running } => run(if_not_running),
         Cmd::Start => block_on(async { start().await.map(|_| ()) }),
         Cmd::Stop => block_on(stop()),
         Cmd::Status => block_on(status()),
         Cmd::Bridge => block_on(bridge()),
+        Cmd::Service { cmd } => match cmd {
+            ServiceCmd::Install { no_linger } => service::install(!no_linger),
+            ServiceCmd::Uninstall => service::uninstall(),
+            ServiceCmd::Status => service::status(),
+        },
     };
     if let Err(e) = result {
         eprintln!("swarmd: {e:#}");
@@ -77,12 +106,19 @@ fn shim_exe() -> Result<PathBuf> {
     bail!("swarm-shim not found next to {}", exe.display())
 }
 
-fn run() -> Result<()> {
+fn run(if_not_running: bool) -> Result<()> {
     paths::close_inherited_fds();
     init_logging();
     let runtime = paths::runtime_dir();
     paths::ensure_private_dir(&runtime)?;
-    let _lock = lock(&paths::daemon_lock(&runtime))?;
+    let _lock = match lock(&paths::daemon_lock(&runtime)) {
+        Ok(l) => l,
+        Err(_) if if_not_running => {
+            tracing::info!("another swarmd is already running");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     let shim = shim_exe()?;
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;

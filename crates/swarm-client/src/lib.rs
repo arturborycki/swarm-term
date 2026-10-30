@@ -75,9 +75,9 @@ impl Client {
     /// Connects to `host`'s daemon through `ssh host swarmd bridge`. Uses the
     /// system ssh, so keys, agent and `~/.ssh/config` apply.
     pub async fn connect_ssh(host: &str, client_name: &str) -> Result<Client> {
-        let remote = r#"p="$HOME/.local/share/swarm/bin/swarmd"; [ -x "$p" ] || p=swarmd; exec "$p" bridge"#;
+        let remote = remote_swarmd_command("bridge");
         let mut child = tokio::process::Command::new("ssh")
-            .args(["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", host, remote])
+            .args(["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", host, &remote])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -341,7 +341,14 @@ pub fn resolve<'a>(sessions: &'a [SessionInfo], query: &str) -> Result<&'a Sessi
     }
 }
 
-fn daemon_exe() -> PathBuf {
+/// A remote shell command running `swarmd <args>` from the per-user install
+/// location, falling back to `PATH`.
+pub fn remote_swarmd_command(args: &str) -> String {
+    format!(r#"p="$HOME/.local/share/swarm/bin/swarmd"; [ -x "$p" ] || p=swarmd; exec "$p" {args}"#)
+}
+
+/// The local `swarmd` binary: `SWARM_DAEMON_PATH`, next to this executable, or on `PATH`.
+pub fn daemon_exe() -> PathBuf {
     if let Some(p) = std::env::var_os("SWARM_DAEMON_PATH") {
         return PathBuf::from(p);
     }

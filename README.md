@@ -5,9 +5,10 @@ daemon, local or remote. See [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Status
 
-Milestones M0–M1 (daemon core) are working: sessions survive closing the
-client and restarting the daemon, and can be listed, attached, detached and
-removed from the command line. The GUI (Warp fork, M2) isn't started yet.
+Milestones M0–M1 (daemon core) are working on macOS and Linux: sessions
+survive closing the client and restarting the daemon, and can be listed,
+attached, detached and removed from the command line, locally or over ssh.
+The GUI (Warp fork, M2) isn't started yet.
 
 | Crate | What it is |
 |---|---|
@@ -37,10 +38,29 @@ Inside the session, press Ctrl-\ to detach. Then:
 ./target/release/swarmctl attach work
 ```
 
-Other commands: `swarmctl rename`, `kill`, `rm`, `info`, `meta`, `daemon status|stop`,
-and `--host <ssh-host>` to talk to a remote daemon (needs `swarmd` installed there,
-at `~/.local/share/swarm/bin/swarmd` or on `PATH`). The daemon starts on first use;
-`swarmd stop` stops it without ending any session.
+Other commands: `swarmctl rename`, `kill`, `rm`, `info`, `meta`, `daemon status|stop`.
+The daemon starts on first use; `swarmd stop` stops it without ending any session.
+
+To start the daemon at login instead (launchd agent on macOS, systemd user unit on
+Linux, which also turns on lingering so sessions survive logout):
+
+```bash
+./target/release/swarmctl daemon install-service
+```
+
+`daemon uninstall-service` goes back to starting it on demand; `daemon service-status`
+shows the current mode.
+
+### Remote hosts
+
+Add `--host <ssh-host>` to any command to use the daemon on that machine through your
+own ssh setup (keys, agent, `~/.ssh/config`). The host needs `swarmd` and `swarm-shim`
+in `~/.local/share/swarm/bin/` (or `swarmd` on `PATH`); automatic install comes with
+the app (M3). For example:
+
+```bash
+./target/release/swarmctl --host devbox new --name build
+```
 
 ## Tests
 
@@ -50,4 +70,8 @@ cargo test --workspace
 
 The end-to-end tests in `crates/swarmd/tests/e2e.rs` start real daemons, shims
 and shells. `scripts/interactive-check.exp` drives `swarmctl` with vim and htop
-in a real pty.
+in a real pty:
+
+```bash
+cargo build && rm -rf /tmp/swx && mkdir -p /tmp/swx && expect scripts/interactive-check.exp $PWD/target/debug
+```
