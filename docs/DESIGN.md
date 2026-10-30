@@ -286,6 +286,15 @@ Known issues (investigated 2026-10-30):
 
 **No "processes are running" warnings (2026-10-30).** Warp asks before quitting or closing a tab/window when commands are running, because for Warp that kills them. In Swarm they keep running in the daemon, so `quit_warning` no longer counts running commands when daemon sessions are on. It still warns about unsaved files and live shared sessions, which closing does lose. Title: "Quit Swarm?". Verified: with a counter loop open in a tab, quitting takes ~1 s with no dialog. Across 15 s with the app closed the loop produced 128 more lines, and the reattach replayed `n=0..554` with no gaps. "Connect…" isn't shown until remote hosts work (M3), rather than as a dead button. The title bar and sidebar are the first thing users see, and the picker is what makes detached sessions reachable.
 
+### Warp's own services out of the app (2026-10-30)
+
+- AI is already off: Warp disables it for logged-out users, and Swarm skips sign-in. Warp Drive commands don't appear either.
+- **Settings** lists only Swarm's own pages: Appearance, Features, Keyboard shortcuts, Warpify, Privacy, Editor and Code Review, About (`swarm::shows_settings_section`). Account/sign-up/plans, Agents, Billing, Cloud platform, Teams, Referrals, Shared blocks and Warp Drive are gone, and any request for a hidden page (Cmd+, defaults to Account in Warp) opens Appearance.
+- The palette no longer offers Warp's Oz cloud-agent CLI install; "Warp completions" is "Swarm completions".
+- The debug-build "Lines: … Size: …" block footer is off in Swarm.
+
+Next for Settings: the Sessions, Daemon and Hosts pages from the mockup (§9b).
+
 ### Sidebar or tabs (built 2026-10-30)
 
 The sidebar button (⌘B) switches between the two layouts from §9b. With the sidebar shown, sessions are listed in it (Warp's vertical tabs panel). With it hidden, sessions become tabs across the title bar (Warp's horizontal tab bar), and the button stays at the left of the title bar to bring the sidebar back. Implemented by having the toggle switch Warp's `use_vertical_tabs` setting, so every part of Warp's layout follows, and the choice is remembered. The Swarm title bar controls (Connect…, N detached) appear in both layouts. Verified in the app: sidebar → tabs → sidebar.
