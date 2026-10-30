@@ -1,0 +1,81 @@
+# Drives swarmctl in a real pty with vim and htop: type, detach (Ctrl-\),
+# restart the daemon, reattach, check replay, clean up.
+# Usage: cargo build && rm -rf /tmp/swx && mkdir -p /tmp/swx && expect scripts/interactive-check.exp $PWD/target/debug
+
+set env(SWARM_RUNTIME_DIR) /tmp/swx/run
+set env(SWARM_STATE_DIR) /tmp/swx/state
+set env(TERM) xterm-256color
+set stty_init "rows 40 cols 120"
+set timeout 10
+set bin [lindex $argv 0]
+proc ok {m} { puts "\n>>> OK: $m"; flush stdout }
+proc fail {m} { puts "\n>>> FAIL: $m"; flush stdout; exit 1 }
+proc done {} { catch {expect eof}; catch {wait} }
+proc run {args} { global bin; return [exec {*}$args] }
+
+# vim: type, detach
+spawn $bin/swarmctl new --name ed -- vim -u NONE -N /tmp/swx/file.txt
+expect {
+    "file.txt" {  }
+    timeout { fail "vim did not start" }
+}
+send "ihello from vim\033"
+expect {
+    "hello from vim" {  ok "typed in vim"  }
+    timeout { fail "no echo in vim" }
+}
+send "\034"
+expect {
+    "detached from ed" {  ok "detached with Ctrl-\\"  }
+    timeout { fail "detach" }
+}
+done
+
+# stop the daemon while vim keeps running; the next command starts a new one
+run $bin/swarmd stop
+set out [run $bin/swarmctl ls]
+puts $out
+if {[regexp {ed .*running vim} $out]} { ok "daemon restarted, vim session re-adopted" } else { fail "ls after restart" }
+
+spawn $bin/swarmctl attach ed
+expect {
+    "hello from vim" {  ok "reattached, vim content replayed"  }
+    timeout { fail "replay" }
+}
+send ":wq\r"
+expect {
+    "session exited with code 0" {  ok "vim saved and exited"  }
+    timeout { fail "vim exit" }
+}
+done
+
+# htop: start detached, attach, detach, reattach (needs a repaint)
+run $bin/swarmctl new --name top -d -- htop
+spawn $bin/swarmctl attach top
+expect {
+    "Quit" {  ok "htop visible"  }
+    timeout { fail "htop" }
+}
+send "\034"
+expect {
+    "detached from top" {  }
+    timeout { fail "htop detach" }
+}
+done
+spawn $bin/swarmctl attach top
+expect {
+    "Quit" {  ok "htop visible after reattach"  }
+    timeout { fail "htop reattach" }
+}
+send "\034"
+expect {
+    "detached from top" {  }
+    timeout { fail "htop detach 2" }
+}
+done
+
+run $bin/swarmctl rm top
+run $bin/swarmctl rm ed
+set out [run $bin/swarmctl ls]
+if {[string match "*No sessions*" $out]} { ok "removed everything" } else { fail "cleanup: $out" }
+run $bin/swarmd stop

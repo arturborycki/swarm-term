@@ -1,0 +1,15 @@
+[package]
+name = "swarmctl"
+description = "Command-line client for swarm-term sessions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+swarm-client.workspace = true
+swarm-proto.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+libc.workspace = true
+tokio.workspace = true

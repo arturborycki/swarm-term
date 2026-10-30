@@ -1,0 +1,127 @@
+//! `swarm-shim`: holds one session's PTY, child process and scrollback, and
+//! serves it on `$RUNTIME/shims/<id>.sock`. It outlives `swarmd` and the GUI.
+
+mod buffer;
+mod scan;
+mod server;
+mod session;
+
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
+use swarm_proto::{paths, CreateOpts, SessionState};
+use tokio::net::UnixListener;
+use tokio::sync::Notify;
+
+pub use session::Session;
+
+pub const DEFAULT_SCROLLBACK: usize = 16 * 1024 * 1024;
+pub const DEFAULT_EXIT_RETENTION: Duration = Duration::from_secs(10 * 60);
+
+pub struct ShimConfig {
+    pub id: String,
+    pub runtime_dir: PathBuf,
+    pub opts: CreateOpts,
+    pub scrollback: usize,
+    /// How long an exited session's output is kept if nobody removes it.
+    pub exit_retention: Duration,
+}
+
+impl ShimConfig {
+    /// Parses `--id ID --runtime-dir DIR --opts HEX [--scrollback BYTES] [--retention-secs N]`.
+    pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Self> {
+        let mut id = None;
+        let mut runtime_dir = None;
+        let mut opts = None;
+        let mut scrollback = DEFAULT_SCROLLBACK;
+        let mut exit_retention = DEFAULT_EXIT_RETENTION;
+        let mut it = args.into_iter();
+        while let Some(flag) = it.next() {
+            let mut value = || it.next().with_context(|| format!("{flag} needs a value"));
+            match flag.as_str() {
+                "--id" => id = Some(value()?),
+                "--runtime-dir" => runtime_dir = Some(PathBuf::from(value()?)),
+                "--opts" => {
+                    let bytes = swarm_proto::hex::decode(&value()?).context("--opts is not hex")?;
+                    opts = Some(postcard::from_bytes::<CreateOpts>(&bytes).context("--opts is not CreateOpts")?);
+                }
+                "--scrollback" => scrollback = value()?.parse().context("--scrollback")?,
+                "--retention-secs" => {
+                    exit_retention = Duration::from_secs(value()?.parse().context("--retention-secs")?)
+                }
+                other => bail!("unknown argument {other}"),
+            }
+        }
+        let id = id.context("--id is required")?;
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            bail!("invalid session id {id:?}");
+        }
+        Ok(ShimConfig {
+            id,
+            runtime_dir: runtime_dir.context("--runtime-dir is required")?,
+            opts: opts.unwrap_or_default(),
+            scrollback: scrollback.max(64 * 1024),
+            exit_retention,
+        })
+    }
+}
+
+/// Runs the shim until the session is removed or its exit retention passes.
+pub fn run(cfg: ShimConfig) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+    rt.block_on(async_run(cfg))
+}
+
+async fn async_run(cfg: ShimConfig) -> Result<()> {
+    let shims = paths::shims_dir(&cfg.runtime_dir);
+    paths::ensure_private_dir(&cfg.runtime_dir)?;
+    paths::ensure_private_dir(&shims)?;
+    let sock = paths::shim_socket(&cfg.runtime_dir, &cfg.id);
+    if sock.exists() {
+        if tokio::net::UnixStream::connect(&sock).await.is_ok() {
+            bail!("a shim for {} is already running", cfg.id);
+        }
+        std::fs::remove_file(&sock)?;
+    }
+    let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+
+    let session = match Session::spawn(&cfg.id, &cfg.opts, cfg.scrollback) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_file(&sock);
+            return Err(e);
+        }
+    };
+    tracing::info!(id = %cfg.id, pid = session.pid(), "session started");
+
+    let shutdown = Arc::new(Notify::new());
+    tokio::spawn(server::serve(session.clone(), listener, shutdown.clone()));
+
+    let fg = session.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            tick.tick().await;
+            fg.refresh_foreground();
+        }
+    });
+
+    let mut rx = session.subscribe();
+    let exited = async {
+        let _ = rx.wait_for(|i| !matches!(i.state, SessionState::Running)).await;
+        tracing::info!(id = %cfg.id, "session exited; keeping output for {:?}", cfg.exit_retention);
+        tokio::time::sleep(cfg.exit_retention).await;
+    };
+    tokio::select! {
+        _ = shutdown.notified() => tracing::info!(id = %cfg.id, "session removed"),
+        _ = exited => tracing::info!(id = %cfg.id, "exit retention passed"),
+    }
+    let _ = std::fs::remove_file(&sock);
+    // Give in-flight replies a moment to reach their sockets.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    Ok(())
+}

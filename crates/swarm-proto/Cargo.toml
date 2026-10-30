@@ -1,0 +1,12 @@
+[package]
+name = "swarm-proto"
+description = "Wire protocol, framing and shared paths for swarm-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true
+postcard.workspace = true
+serde.workspace = true
+tokio.workspace = true
