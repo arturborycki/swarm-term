@@ -584,7 +584,8 @@ One sheet (§3a): daemon start mode, optional "Connect to a server", and a singl
 - **Host groups:** remote sessions without a group of their own open in a group per host, in the host's color; their rows show the shell's title.
 - **Status bar:** under the active session, "This Mac · zsh · ~ · 120×39" and "Only this window" or "Also attached: swarmctl". The app attaches as "Swarm on <this Mac>".
 - **Reconnecting banner:** "Connection to orb lost. Reconnecting — output will resume where it stopped." with Retry Now. Checked against the VM: Retry Now reconnected within a second instead of at the next backoff step.
-- **Still to do:** the sidebar header and footer from the mockup (session count, "N detached" and Connect… at the bottom), the session picker as its own popover (it is the command palette today), the connect sheet's inline checklist, "new output" bolding for background tabs, and the exited banner (an exited session's tab closes today, so there's nothing to show it on).
+- **Sidebar header and footer:** "SESSIONS · N OPEN" over the filter field ("Filter sessions"), and "N detached" / Connect… at the bottom; their menus open upward from there.
+- **Still to do:** the session picker as its own popover (it is the command palette today), the connect sheet's inline checklist, "new output" bolding for background tabs, and the exited banner (an exited session's tab closes today, so there's nothing to show it on).
 
 ### Performance budgets (measured on an M1 MacBook Air)
 | Action | Target |
