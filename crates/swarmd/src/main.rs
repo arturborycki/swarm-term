@@ -1,6 +1,7 @@
 //! `swarmd`: the per-user session daemon.
 
 mod registry;
+mod restore;
 mod server;
 mod service;
 
@@ -46,6 +47,21 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ServiceCmd,
     },
+    /// Recreate sessions (same name, folder, tab order) after a reboot.
+    Restore {
+        #[command(subcommand)]
+        cmd: RestoreCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum RestoreCmd {
+    /// Recreate sessions whose processes are gone when the daemon starts.
+    On,
+    /// Don't.
+    Off,
+    /// Show whether it's on.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -74,6 +90,14 @@ fn main() {
             ServiceCmd::Install { no_linger } => service::install(!no_linger),
             ServiceCmd::Uninstall => service::uninstall(),
             ServiceCmd::Status => service::status(),
+        },
+        Cmd::Restore { cmd } => match cmd {
+            RestoreCmd::On => restore::set_enabled(true),
+            RestoreCmd::Off => restore::set_enabled(false),
+            RestoreCmd::Status => {
+                println!("restore after reboot: {}", if restore::is_enabled() { "on" } else { "off" });
+                Ok(())
+            }
         },
     };
     if let Err(e) = result {
@@ -130,6 +154,7 @@ fn run(if_not_running: bool) -> Result<()> {
 
         let registry = registry::Registry::new(runtime.clone(), shim);
         registry.adopt_existing().await?;
+        restore::start(&registry).await;
         let shutdown = Arc::new(Notify::new());
         let server = Arc::new(server::Server { registry, shutdown: shutdown.clone() });
         tracing::info!(socket = %sock.display(), "swarmd {} listening", env!("CARGO_PKG_VERSION"));

@@ -556,3 +556,37 @@ async fn smallest_size_policy_fits_every_writable_client() {
     }
     panic!("PTY should grow back to 50x150; got {seen:?}");
 }
+
+#[tokio::test]
+async fn restore_after_reboot_recreates_lost_sessions() {
+    let mut env = Env::new().await;
+    std::fs::create_dir_all(env.dir.path().join("state")).unwrap();
+    std::fs::write(env.dir.path().join("state").join("restore-after-reboot"), b"").unwrap();
+    let c = env.client().await;
+    let mut opts = sh_opts("nightly");
+    opts.ui.insert("group".into(), "builds".into());
+    opts.ui.insert("warp.session_id".into(), "42".into());
+    let info = c.create(opts).await.unwrap();
+    // Give the snapshot writer time to record it.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    drop(c);
+
+    // "Reboot": the daemon and the session's shim are gone.
+    env.kill_daemon();
+    let _ = Command::new("pkill").args(["-f", &format!("swarm-shim --id {}", info.id)]).status();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    env.start_daemon().await;
+
+    let c = env.client().await;
+    let sessions = c.list().await.unwrap();
+    let restored = sessions
+        .iter()
+        .find(|s| s.ui.get("restored_from") == Some(&info.id))
+        .unwrap_or_else(|| panic!("no session restored from {}; have {sessions:?}", info.id));
+    assert_ne!(restored.id, info.id);
+    assert_eq!(restored.name.as_deref(), Some("nightly"));
+    assert_eq!(restored.cwd.as_deref(), Some("/tmp"));
+    assert_eq!(restored.ui.get("group").map(String::as_str), Some("builds"));
+    assert!(!restored.ui.contains_key("warp.session_id"));
+    assert!(restored.is_running());
+}
