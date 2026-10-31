@@ -95,6 +95,11 @@ async fn handle(session: Arc<Session>, stream: UnixStream, shutdown: Arc<Notify>
                 }
                 send_replay(&mut wr, att.replay_from, &att.replay).await?;
                 att.replay = Vec::new();
+                // Ends at `live_from`, so clients resume from the right offset.
+                if let Some(screen) = att.screen.take().filter(|s| s.len() as u64 <= att.live_from) {
+                    let offset = att.live_from - screen.len() as u64;
+                    write_frame(&mut wr, &ShimMsg::Output { offset, data: screen, replay: true }).await?;
+                }
                 if let Some((code, signal)) = att.exited {
                     write_frame(&mut wr, &ShimMsg::Exited { code, signal }).await?;
                 }

@@ -65,6 +65,8 @@ struct Inner {
     pending_precmd: Option<(u64, Vec<u8>)>,
     /// Recent commands' block headers, oldest first.
     headers: std::collections::VecDeque<BlockHeader>,
+    /// The terminal screen as the output left it, for full-screen apps.
+    screen: vt100::Parser,
     scanner: Scanner,
     info: SessionInfo,
     clients: HashMap<u64, Slot>,
@@ -91,6 +93,10 @@ pub struct Attachment {
     pub replay: Vec<u8>,
     /// Session-describing hooks the replay no longer contains, to send first.
     pub prelude: Vec<(u64, Vec<u8>)>,
+    /// For a full-screen app: its current screen, drawn after the replay (the
+    /// replay alone may not reproduce it, e.g. if the switch to the alternate
+    /// screen was trimmed from the buffer).
+    pub screen: Option<Vec<u8>>,
     pub exited: Option<(Option<i32>, Option<i32>)>,
     /// The session is in a full-screen app: nudge its size so it repaints.
     pub wants_repaint: bool,
@@ -167,6 +173,7 @@ impl Session {
                 sticky: Vec::new(),
                 pending_precmd: None,
                 headers: Default::default(),
+                screen: vt100::Parser::new(info.size.rows, info.size.cols, 0),
                 scanner: Scanner::default(),
                 info,
                 clients: HashMap::new(),
@@ -222,6 +229,7 @@ impl Session {
         let mut inner = self.inner.lock().unwrap();
         let offset = inner.ring.end();
         inner.ring.push(data);
+        inner.screen.process(data);
         let ev = inner.scanner.feed(offset, data);
         for b in ev.boundaries {
             inner.ring.add_boundary(b);
@@ -361,9 +369,14 @@ impl Session {
             SessionState::Running => None,
         };
         let wants_repaint = inner.info.alt_screen && exited.is_none() && !readonly && mode == AttachMode::Full;
+        let screen = (full && exited.is_none() && inner.info.alt_screen && inner.screen.screen().alternate_screen()).then(|| {
+            let mut bytes = b"\x1b[?1049h".to_vec();
+            bytes.extend(inner.screen.screen().state_formatted());
+            bytes
+        });
         self.notify(&mut inner, true);
         let info = self.snapshot(&inner);
-        Attachment { client_id, rx, lag, info, replay_from, live_from, replay, prelude, exited, wants_repaint }
+        Attachment { client_id, rx, lag, info, replay_from, live_from, replay, prelude, screen, exited, wants_repaint }
     }
 
     pub fn detach(&self, client_id: u64) {
@@ -436,6 +449,7 @@ impl Session {
             return false;
         }
         inner.info.size = size;
+        inner.screen.set_size(size.rows, size.cols);
         self.raw_resize(size);
         true
     }

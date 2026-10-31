@@ -590,3 +590,41 @@ async fn restore_after_reboot_recreates_lost_sessions() {
     assert!(!restored.ui.contains_key("warp.session_id"));
     assert!(restored.is_running());
 }
+
+#[tokio::test]
+async fn full_attach_to_a_full_screen_app_ends_with_its_screen() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let info = c.create(sh_opts("altscreen")).await.unwrap();
+    let mut a = c.attach(&info.id, AttachMode::Live, Some(Size { cols: 80, rows: 24 }), false).await.unwrap();
+    a.input(b"printf '\\033[?1049h\\033[2J\\033[5;10HALT-SCREEN-MARK'; sleep 30\n".to_vec()).await.unwrap();
+    read_until(&mut a, "ALT-SCREEN-MARK").await;
+    // Wait until the shim has seen the switch to the alternate screen.
+    timeout(Duration::from_secs(10), async {
+        while !c.list().await.unwrap().iter().any(|s| s.id == info.id && s.alt_screen) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("alt screen not reported");
+    a.detach().await.unwrap();
+
+    let mut b = c.attach(&info.id, AttachMode::Full, None, false).await.unwrap();
+    let mut last = Vec::new();
+    let _ = timeout(Duration::from_secs(3), async {
+        while let Some(ev) = b.recv().await {
+            match ev {
+                StreamEvent::Output { data, replay: true, offset } => {
+                    assert!(offset + data.len() as u64 <= b.live_from, "replay must not run past live_from");
+                    last = data;
+                }
+                StreamEvent::Output { replay: false, .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(last.starts_with(b"\x1b[?1049h"), "last replayed frame is the screen snapshot");
+    let text = String::from_utf8_lossy(&last);
+    assert!(text.contains("ALT-SCREEN-MARK"), "snapshot shows the app's screen: {text:?}");
+}
