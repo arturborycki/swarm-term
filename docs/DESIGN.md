@@ -544,7 +544,7 @@ A popover from "N detached", from the host group's menu, or with **Cmd+O**. It's
 | **File** | New Session (Cmd+T), New Session on Host ▸, Open Session… (Cmd+O), Connect to Host… (Cmd+Shift+K), Detach Tab (Cmd+W), Terminate Session… (Cmd+Shift+W), Close Window |
 | **Session** | Rename… , Tab Color ▸, Restart (when exited), Attach Read-Only, Copy Attach Command, Show Session Info (Cmd+I) |
 
-Shortcuts as built (2026-10-31): ⌘O opens the session picker (Warp's Files palette moves to ⌥⌘O). Connect to Host… is ⌃⌘H, because ⇧⌘K clears lines in the input editor and ⌃⌘K opens the keyboard shortcuts. Sessions sidebar is ⌃⌘S (⌘B too).
+Shortcuts as built (2026-10-31): ⌘O opens the session picker (Warp's Files palette moves to ⌥⌘O; its navigation palette, which also finds detached sessions, stays on ⇧⌘P). Connect to Host… is ⌃⌘H, because ⇧⌘K clears lines in the input editor and ⌃⌘K opens the keyboard shortcuts. Sessions sidebar is ⌃⌘S (⌘B too).
 | **View** | Sessions as Sidebar (Ctrl+Cmd+S), Show Status Bar, Collapse Host Groups, Warp's existing view items |
 | **Window** | Standard items, plus a list of tabs grouped by host; Move Tab to New Window |
 
@@ -585,7 +585,8 @@ One sheet (§3a): daemon start mode, optional "Connect to a server", and a singl
 - **Status bar:** under the active session, "This Mac · zsh · ~ · 120×39" and "Only this window" or "Also attached: swarmctl". The app attaches as "Swarm on <this Mac>".
 - **Reconnecting banner:** "Connection to orb lost. Reconnecting — output will resume where it stopped." with Retry Now. Checked against the VM: Retry Now reconnected within a second instead of at the next backoff step.
 - **Sidebar header and footer:** "SESSIONS · N OPEN" over the filter field ("Filter sessions"), and "N detached" / Connect… at the bottom; their menus open upward from there.
-- **Still to do:** the session picker as its own popover (it is the command palette today), the connect sheet's inline checklist, "new output" bolding for background tabs, and the exited banner (an exited session's tab closes today, so there's nothing to show it on).
+- **Session picker:** ⌘O (File → Open Session…), "N detached" in the title bar or the sidebar footer open a popover under the title bar's right end: a switch per host (This Mac and each followed host, with counts), a filter by name, folder or command, and rows with the state mark, name ("also open" when another client is attached), folder, what's running and last activity. It lists running sessions that no window of this app has open. Rows are checked to open or terminate several (Terminate confirms); ↑↓ move, Space (empty filter) or ⇧↩ select, ↩ opens the checked rows or the highlighted one, ⌘↩ opens every match, Esc closes, double-click opens one. Not done from the mockup: ⌘⌫ (the filter field takes it) and the right-click menu (Rename, Copy attach command). Exited sessions aren't listed; Settings → Sessions removes them. Warp's navigation palette is "Find Tab or Session…" (⇧⌘P) and its file search ⌥⌘O.
+- **Still to do:** the connect sheet's inline checklist, "new output" bolding for background tabs, and the exited banner (an exited session's tab closes today, so there's nothing to show it on).
 
 ### Performance budgets (measured on an M1 MacBook Air)
 | Action | Target |
