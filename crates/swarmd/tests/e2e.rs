@@ -231,8 +231,17 @@ async fn attach_size_resizes_the_pty() {
     a.input(b"stty size\n".to_vec()).await.unwrap();
     read_until(&mut a, "33 101").await;
     a.resize(Size { cols: 120, rows: 40 }).await.unwrap();
-    a.input(b"stty size\n".to_vec()).await.unwrap();
-    read_until(&mut a, "40 120").await;
+    // The resize reaches the PTY asynchronously; under load a `stty size`
+    // sent right after it can still see the old size, so ask until it doesn't.
+    let mut seen = String::new();
+    for _ in 0..20 {
+        a.input(b"stty size\n".to_vec()).await.unwrap();
+        seen.push_str(&read_for(&mut a, Duration::from_millis(500)).await);
+        if seen.contains("40 120") {
+            return;
+        }
+    }
+    panic!("the PTY never reported 40 120; got {seen:?}");
 }
 
 #[tokio::test]
