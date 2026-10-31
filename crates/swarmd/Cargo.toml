@@ -1,0 +1,30 @@
+[package]
+name = "swarmd"
+description = "swarm-term session daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "swarmd"
+path = "src/main.rs"
+
+[[bin]]
+name = "swarm-shim"
+path = "src/bin/swarm-shim.rs"
+
+[dependencies]
+swarm-proto.workspace = true
+swarm-shim.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+postcard.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+swarm-client.workspace = true
+tempfile.workspace = true

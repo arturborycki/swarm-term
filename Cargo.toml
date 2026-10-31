@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/swarm-proto",
+    "crates/swarm-shim",
+    "crates/swarm-client",
+    "crates/swarmd",
+    "crates/swarmctl",
+]
+# The Warp fork is its own workspace.
+exclude = ["app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+
+[workspace.dependencies]
+swarm-proto = { path = "crates/swarm-proto" }
+swarm-shim = { path = "crates/swarm-shim" }
+swarm-client = { path = "crates/swarm-client" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+libc = "0.2"
+portable-pty = "0.9"
+postcard = { version = "1", features = ["use-std"] }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ulid = "1"
+vte = "0.15"

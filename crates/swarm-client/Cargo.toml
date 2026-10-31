@@ -1,0 +1,13 @@
+[package]
+name = "swarm-client"
+description = "Async client library for swarmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+swarm-proto.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ulid.workspace = true
