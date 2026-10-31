@@ -437,9 +437,121 @@ fn response_len(s: &[u8]) -> Option<usize> {
     }
 }
 
+/// Drops zsh's partial-line mark (`PROMPT_SP`) from replayed output.
+///
+/// Before each prompt zsh prints a standout `%` (`#` for root), one line's
+/// worth of spaces and `\r \r`. At the width it was written for, that erases
+/// itself; replayed into a narrower screen the spaces wrap and leave a stray
+/// `%` after every command. Chunks may split a mark, so a possible start at the
+/// end of a chunk is held back until the next one, or [`Self::finish`].
+#[derive(Default)]
+pub struct EolMarkFilter {
+    carry: Vec<u8>,
+}
+
+/// How much of a possible mark is held back at most.
+const EOL_MARK_MAX: usize = 4096;
+/// Fewer spaces than this after the `%` is not zsh's mark.
+const EOL_MARK_MIN_SPACES: usize = 8;
+
+enum Scan {
+    Full(usize),
+    Partial,
+    No,
+}
+
+impl EolMarkFilter {
+    /// `data` without complete marks; a possible incomplete one at the end is kept.
+    pub fn push(&mut self, data: &[u8]) -> Vec<u8> {
+        let mut buf = std::mem::take(&mut self.carry);
+        buf.extend_from_slice(data);
+        let mut out = Vec::with_capacity(buf.len());
+        let mut i = 0;
+        while i < buf.len() {
+            if buf[i] == 0x1b {
+                match scan_eol_mark(&buf[i..]) {
+                    Scan::Full(n) => {
+                        i += n;
+                        continue;
+                    }
+                    Scan::Partial if buf.len() - i <= EOL_MARK_MAX => {
+                        self.carry = buf[i..].to_vec();
+                        return out;
+                    }
+                    _ => {}
+                }
+            }
+            out.push(buf[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// Whatever is held back (the replay is over).
+    pub fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.carry)
+    }
+}
+
+fn scan_sgr(s: &[u8]) -> Scan {
+    if s.first() != Some(&0x1b) {
+        return Scan::No;
+    }
+    match s.get(1) {
+        None => return Scan::Partial,
+        Some(b'[') => {}
+        Some(_) => return Scan::No,
+    }
+    let mut k = 2;
+    while k < s.len() && (s[k].is_ascii_digit() || s[k] == b';') {
+        k += 1;
+    }
+    match s.get(k) {
+        None => Scan::Partial,
+        Some(b'm') => Scan::Full(k + 1),
+        Some(_) => Scan::No,
+    }
+}
+
+/// SGR sequences, then `%` or `#`, SGR sequences, spaces and `\r \r`.
+fn scan_eol_mark(s: &[u8]) -> Scan {
+    let mut j = 0;
+    let mut sgrs = 0;
+    let skip_sgrs = |j: &mut usize, n: &mut usize| loop {
+        match scan_sgr(&s[*j..]) {
+            Scan::Full(len) => {
+                *j += len;
+                *n += 1;
+            }
+            Scan::Partial => return false,
+            Scan::No => return true,
+        }
+    };
+    if !skip_sgrs(&mut j, &mut sgrs) {
+        return Scan::Partial;
+    }
+    match s.get(j) {
+        None => return Scan::Partial,
+        Some(b'%' | b'#') if sgrs > 0 => j += 1,
+        Some(_) => return Scan::No,
+    }
+    if !skip_sgrs(&mut j, &mut sgrs) {
+        return Scan::Partial;
+    }
+    let spaces = s[j..].iter().take_while(|&&b| b == b' ').count();
+    j += spaces;
+    let rest = &s[j..];
+    let tail = b"\r \r";
+    if rest.len() < tail.len() {
+        return if tail.starts_with(rest) { Scan::Partial } else { Scan::No };
+    }
+    if spaces >= EOL_MARK_MIN_SPACES && rest.starts_with(tail) { Scan::Full(j + tail.len()) } else { Scan::No }
+}
+
 #[cfg(test)]
 mod filter_tests {
     use super::strip_terminal_responses as strip;
+    use super::EolMarkFilter;
 
     #[test]
     fn keeps_typing_and_keys() {
@@ -453,5 +565,44 @@ mod filter_tests {
         assert_eq!(strip(b"x\x1b]11;rgb:0000/0000/0000\x07y"), b"xy");
         assert_eq!(strip(b"\x1bP>|xterm(390)\x1b\\z"), b"z");
         assert_eq!(strip(b"\x1b[?2004;1$yq"), b"q");
+    }
+
+    fn filter_all(chunks: &[&[u8]]) -> Vec<u8> {
+        let mut f = EolMarkFilter::default();
+        let mut out = Vec::new();
+        for c in chunks {
+            out.extend(f.push(c));
+        }
+        out.extend(f.finish());
+        out
+    }
+
+    const MARK: &[u8] = b"\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m                                       \r \r";
+
+    #[test]
+    fn eol_mark_is_dropped_from_replay() {
+        let data = [b"hi".as_slice(), MARK, b"\r\x1b[0mhost% "].concat();
+        assert_eq!(filter_all(&[&data]), b"hi\r\x1b[0mhost% ");
+    }
+
+    #[test]
+    fn eol_mark_split_across_chunks_is_dropped() {
+        let data = [b"out\n".as_slice(), MARK, b"prompt"].concat();
+        for cut in 1..data.len() {
+            assert_eq!(filter_all(&[&data[..cut], &data[cut..]]), b"out\nprompt", "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn other_output_is_kept() {
+        let keep: &[&[u8]] = &[
+            b"50%        \r \r",                      // no styling: not zsh's mark
+            b"\x1b[7m%\x1b[0m  \r \r",                // too few spaces
+            b"\x1b[1mbold\x1b[0m and \x1b[31mred\x1b[0m", // ordinary colors
+            b"\x1b[7m%\x1b[0m          \n",          // no \r \r
+        ];
+        for k in keep {
+            assert_eq!(filter_all(&[k]), k.to_vec());
+        }
     }
 }
