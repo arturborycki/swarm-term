@@ -45,6 +45,15 @@ struct BlockHeader {
     bytes: Vec<u8>,
 }
 
+/// UI metadata key choosing how clients of different sizes share the PTY:
+/// `smallest` fits all writable clients; anything else (default) gives the
+/// size to whichever client typed last.
+pub const META_SIZE_POLICY: &str = "size_policy";
+
+fn smallest_policy(inner: &Inner) -> bool {
+    inner.info.ui.get(META_SIZE_POLICY).map(String::as_str) == Some("smallest")
+}
+
 /// How many recent block headers are kept.
 const BLOCK_HEADERS: usize = 64;
 
@@ -342,7 +351,9 @@ impl Session {
         inner.next_client += 1;
         let readonly = desc.readonly;
         inner.clients.insert(client_id, Slot { tx, lag: lag.clone(), desc, size });
-        if let (Some(size), false) = (size, readonly) {
+        if smallest_policy(&inner) {
+            self.apply_smallest(&mut inner);
+        } else if let (Some(size), false) = (size, readonly) {
             self.apply_size(&mut inner, size);
         }
         let exited = match inner.info.state {
@@ -358,6 +369,9 @@ impl Session {
     pub fn detach(&self, client_id: u64) {
         let mut inner = self.inner.lock().unwrap();
         if inner.clients.remove(&client_id).is_some() {
+            if smallest_policy(&inner) {
+                self.apply_smallest(&mut inner);
+            }
             self.notify(&mut inner, true);
         }
     }
@@ -369,7 +383,7 @@ impl Session {
             return;
         }
         // Latest-active size policy: the client that types owns the size.
-        if let Some(size) = slot.size {
+        if let Some(size) = slot.size.filter(|_| !smallest_policy(&inner)) {
             if self.apply_size(&mut inner, size) {
                 self.notify(&mut inner, true);
             }
@@ -383,7 +397,13 @@ impl Session {
         let mut inner = self.inner.lock().unwrap();
         let Some(slot) = inner.clients.get_mut(&client_id) else { return };
         slot.size = Some(size);
-        if !slot.desc.readonly && self.apply_size(&mut inner, size) {
+        let readonly = slot.desc.readonly;
+        let changed = if smallest_policy(&inner) {
+            self.apply_smallest(&mut inner)
+        } else {
+            !readonly && self.apply_size(&mut inner, size)
+        };
+        if changed {
             self.notify(&mut inner, true);
         }
     }
@@ -397,6 +417,17 @@ impl Session {
         self.raw_resize(Size { cols: size.cols, rows: size.rows - 1 });
         tokio::time::sleep(Duration::from_millis(50)).await;
         self.raw_resize(size);
+    }
+
+    /// `smallest` policy: the PTY fits every writable client, so nobody sees
+    /// wrapped or clipped output. Returns whether the size changed.
+    fn apply_smallest(&self, inner: &mut Inner) -> bool {
+        let sizes = inner.clients.values().filter(|c| !c.desc.readonly).filter_map(|c| c.size);
+        let smallest = sizes.reduce(|a, b| Size { cols: a.cols.min(b.cols), rows: a.rows.min(b.rows) });
+        match smallest {
+            Some(size) => self.apply_size(inner, size),
+            None => false,
+        }
     }
 
     /// Returns whether the size changed.
@@ -440,6 +471,9 @@ impl Session {
             } else {
                 inner.info.ui.insert(k, v);
             }
+        }
+        if smallest_policy(&inner) {
+            self.apply_smallest(&mut inner);
         }
         self.notify(&mut inner, true);
     }

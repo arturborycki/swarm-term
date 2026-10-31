@@ -511,3 +511,36 @@ async fn replay_reopens_a_command_whose_start_was_trimmed() {
     assert!(rest.starts_with(b"line\r\n"), "the kept output starts on a whole line");
     assert!(total > 15_000_000, "the command's kept output is replayed, got {total} bytes");
 }
+
+#[tokio::test]
+async fn smallest_size_policy_fits_every_writable_client() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let info = c.create(sh_opts("smallest")).await.unwrap();
+    let mut ui = std::collections::BTreeMap::new();
+    ui.insert("size_policy".to_string(), "smallest".to_string());
+    c.set_meta(&info.id, MetaUpdate { name: None, ui }).await.unwrap();
+    let mut big = c.attach(&info.id, AttachMode::Live, Some(Size { cols: 150, rows: 50 }), false).await.unwrap();
+    let small = c.attach(&info.id, AttachMode::Live, Some(Size { cols: 90, rows: 30 }), false).await.unwrap();
+    // The big client types; the PTY keeps the small client's size anyway.
+    let mut seen = String::new();
+    for _ in 0..20 {
+        big.input(b"stty size\n".to_vec()).await.unwrap();
+        seen.push_str(&read_for(&mut big, Duration::from_millis(400)).await);
+        if seen.contains("30 90") {
+            break;
+        }
+    }
+    assert!(seen.contains("30 90"), "PTY should fit the smaller client; got {seen:?}");
+    // When the small client leaves, the PTY grows to the remaining one.
+    small.detach().await.unwrap();
+    let mut seen = String::new();
+    for _ in 0..20 {
+        big.input(b"stty size\n".to_vec()).await.unwrap();
+        seen.push_str(&read_for(&mut big, Duration::from_millis(400)).await);
+        if seen.contains("50 150") {
+            return;
+        }
+    }
+    panic!("PTY should grow back to 50x150; got {seen:?}");
+}

@@ -8,19 +8,26 @@
 # Contents/Resources/swarmd/<platform>/, for installing swarmd on Linux hosts.
 #
 # Usage: scripts/bundle-app.sh            (debug)
+#        scripts/bundle-app.sh --release  (optimized)
 # Prints the path of the .app on success.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-cargo build -q -p swarmd -p swarmctl
+PROFILE=debug
+CARGO_PROFILE=()
+if [ "${1:-}" = "--release" ]; then
+    PROFILE=release
+    CARGO_PROFILE=(--release)
+fi
+cargo build -q "${CARGO_PROFILE[@]}" -p swarmd -p swarm-shim -p swarmctl
 
-APP="$ROOT/app/target/debug/bundle/osx/Swarm.app"
+APP="$ROOT/app/target/$PROFILE/bundle/osx/Swarm.app"
 rm -rf "$APP"
-(cd app/app && cargo bundle --bin swarm --features gui >/dev/null)
+(cd app/app && cargo bundle "${CARGO_PROFILE[@]}" --bin swarm --features gui >/dev/null)
 (cd app && ./script/macos/add_framework_rpath "$APP/Contents/MacOS/swarm" >/dev/null)
 (cd app && SKIP_SETTINGS_SCHEMA=1 NO_LICENSES=1 ./script/prepare_bundled_resources "$APP/Contents/Resources" oss >/dev/null)
 for bin in swarmd swarm-shim swarmctl; do
-    cp "$ROOT/target/debug/$bin" "$APP/Contents/MacOS/$bin"
+    cp "$ROOT/target/$PROFILE/$bin" "$APP/Contents/MacOS/$bin"
 done
 if [ -d "$ROOT/target/linux" ]; then
     mkdir -p "$APP/Contents/Resources/swarmd"
