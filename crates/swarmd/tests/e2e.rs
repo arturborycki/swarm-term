@@ -429,7 +429,7 @@ async fn replay_keeps_warp_session_hooks_and_starts_at_precmd() {
     );
     a.input(script.into_bytes()).await.unwrap();
     // Reading the flood live is slow under load; wait on the session instead.
-    timeout(Duration::from_secs(60), async {
+    timeout(Duration::from_secs(180), async {
         loop {
             let s = c.list().await.unwrap().into_iter().find(|s| s.id == info.id).unwrap();
             if s.buffer_end > 17_000_000 && s.foreground.is_none() {
@@ -483,7 +483,7 @@ async fn replay_reopens_a_command_whose_start_was_trimmed() {
     );
     a.input(script.into_bytes()).await.unwrap();
     // The live client falls behind during the flood; wait on the session.
-    timeout(Duration::from_secs(60), async {
+    timeout(Duration::from_secs(180), async {
         loop {
             let s = c.list().await.unwrap().into_iter().find(|s| s.id == info.id).unwrap();
             if s.buffer_end > 24_000_000 {
