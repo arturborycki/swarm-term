@@ -339,6 +339,10 @@ Swarm items act on the active window through a `root_view:workspace_action` glob
 
 As in Warp, menu shortcuts like ⌘, need a focused view in the window; they do nothing (the item is disabled) when nothing in the window has focus.
 
+### Glass window (2026-10-30)
+
+Swarm defaults to a translucent, blurred window: background opacity 88% and blur radius 24 (Warp's own settings, `window_settings.rs`). Users can change both in Settings → Appearance, and a stored value wins over the default. Still to do for the look in the mockups: a first-run sheet, the menu bar extra, the session switcher popover, a Swarm logo on the About page (it still shows Warp's), and state dots in the sidebar.
+
 ### Sidebar or tabs (built 2026-10-30)
 
 The sidebar button (⌘B) switches between the two layouts from §9b. With the sidebar shown, sessions are listed in it (Warp's vertical tabs panel). With it hidden, sessions become tabs across the title bar (Warp's horizontal tab bar), and the button stays at the left of the title bar to bring the sidebar back. Implemented by having the toggle switch Warp's `use_vertical_tabs` setting, so every part of Warp's layout follows, and the choice is remembered. The Swarm title bar controls (Connect…, N detached) appear in both layouts. Verified in the app: sidebar → tabs → sidebar.
