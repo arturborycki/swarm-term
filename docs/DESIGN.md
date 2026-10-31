@@ -352,7 +352,11 @@ Swarm defaults to a translucent, blurred window: background opacity 88% and blur
 - **First run.** On the first launch for a state dir (`$STATE_DIR/first-run-done`), a sheet explains that closing or quitting doesn't stop sessions. It asks when the daemon starts: With Swarm (recommended), When I Log In (`swarmd service install`), or Connect to a Server… (the hosts list). warpui alerts gained an option to drop the "Don't ask again" checkbox; Swarm's own dialogs don't show it.
 - **About** shows Swarm's icon, name and version.
 
-Not done: a Sessions settings page, host colors on tabs, a "Reconnecting…" mark.
+- **Reconnecting mark.** While a tab's connection is down and the bridge retries, its sidebar row shows a yellow dot (`daemon::is_reconnecting`, pushed to the sessions model through `daemon::on_link_change`). Verified against the VM: with swarmd made unrunnable there, both remote tabs turned yellow; once it was restored they reconnected after 4 attempts and the dots cleared.
+- **Host colors.** A remote session's tab takes its host's color (a fixed hash of the host name over cyan, magenta, yellow, green and blue; no red, which reads as an error), unless the tab already has a color. It can be changed from the tab menu.
+- **Settings → Sessions.** Lists every session on this Mac and the followed hosts, live: name, folder, state (idle, running <cmd>, exited <code>), open/detached/open in N places, last activity, and how much scrollback is kept. Terminate sends SIGHUP after a confirmation, Remove drops an exited session, and "Remove Exited Sessions" clears them all. Verified: removed an exited session holding a full 16 MB buffer, terminated a session (its tab closed), then bulk-removed it.
+
+Testing note: a test client fed `/dev/zero` into a session, and the NULs left its zsh producing output endlessly (84 MB in total). Parsing that flood blocked the window. Terminating the session fixed it. A guard against runaway output in one tab is still to do.
 
 ### Sidebar or tabs (built 2026-10-30)
 
