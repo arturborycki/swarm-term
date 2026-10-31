@@ -189,6 +189,22 @@ async fn create_attach_detach_and_replay() {
 }
 
 #[tokio::test]
+async fn close_drops_the_connection_but_not_the_session() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let info = c.create(sh_opts("closing")).await.unwrap();
+    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    c.close();
+    let ev = tokio::time::timeout(Duration::from_secs(5), a.recv()).await.expect("no event after close");
+    assert!(matches!(ev, Some(StreamEvent::Closed { .. })), "attachment must close: {ev:?}");
+    assert!(c.ping().await.is_err(), "requests must fail after close");
+
+    let c2 = env.client().await;
+    let listed = c2.list().await.unwrap();
+    assert!(listed.iter().any(|s| s.id == info.id && s.is_running()), "the session must keep running");
+}
+
+#[tokio::test]
 async fn resume_from_offset_sends_only_the_delta() {
     let env = Env::new().await;
     let c = env.client().await;
