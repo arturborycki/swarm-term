@@ -600,6 +600,8 @@ To meet the reattach budget, the client **renders the tail first**: the shim sen
 
 ## 11. Tech choices (Rust)
 
+**Where the code lives.** This repo (`arturborycki/swarm-term`) has the daemon, shim, client, `swarmctl`, scripts and this design. The Warp fork is checked out in `app/` (ignored here) as its own repo: branch `swarm` on `arturborycki/swarm-app` (private), with `warpdotdev/warp` as `upstream`. The checkout started as a partial clone, so pushing its full history first needed `git backfill` and the LFS objects of older commits.
+
 | Concern | Choice |
 |---|---|
 | async runtime | `tokio` |
