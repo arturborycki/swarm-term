@@ -54,6 +54,11 @@ fn smallest_policy(inner: &Inner) -> bool {
     inner.info.ui.get(META_SIZE_POLICY).map(String::as_str) == Some("smallest")
 }
 
+/// A replayed block keeps at most this many of its last lines (Warp's
+/// default rows per block), plus its first `REPLAY_BLOCK_HEAD` bytes.
+const REPLAY_BLOCK_LINES: usize = 50_000;
+const REPLAY_BLOCK_HEAD: usize = 64 * 1024;
+
 /// How many recent block headers are kept.
 const BLOCK_HEADERS: usize = 64;
 
@@ -90,7 +95,8 @@ pub struct Attachment {
     pub info: SessionInfo,
     pub replay_from: u64,
     pub live_from: u64,
-    pub replay: Vec<u8>,
+    /// The replay as (offset, bytes) pieces; long blocks lose their middle.
+    pub replay: Vec<(u64, Vec<u8>)>,
     /// Session-describing hooks the replay no longer contains, to send first.
     pub prelude: Vec<(u64, Vec<u8>)>,
     /// For a full-screen app: its current screen, drawn after the replay (the
@@ -343,7 +349,7 @@ impl Session {
             }
         }
         let live_from = inner.ring.end();
-        let replay = inner.ring.slice_from(replay_from);
+        let replay = inner.ring.replay_pieces(replay_from, REPLAY_BLOCK_HEAD, REPLAY_BLOCK_LINES);
         let prelude = if full {
             let mut prelude: Vec<(u64, Vec<u8>)> =
                 inner.sticky.iter().filter(|(_, off, _)| *off < replay_from).map(|(_, off, b)| (*off, b.clone())).collect();

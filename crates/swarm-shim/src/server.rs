@@ -93,8 +93,9 @@ async fn handle(session: Arc<Session>, stream: UnixStream, shutdown: Arc<Notify>
                 for (offset, bytes) in std::mem::take(&mut att.prelude) {
                     write_frame(&mut wr, &ShimMsg::Output { offset, data: bytes, replay: true }).await?;
                 }
-                send_replay(&mut wr, att.replay_from, &att.replay).await?;
-                att.replay = Vec::new();
+                for (offset, bytes) in std::mem::take(&mut att.replay) {
+                    send_replay(&mut wr, offset, &bytes).await?;
+                }
                 // Ends at `live_from`, so clients resume from the right offset.
                 if let Some(screen) = att.screen.take().filter(|s| s.len() as u64 <= att.live_from) {
                     let offset = att.live_from - screen.len() as u64;

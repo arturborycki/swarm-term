@@ -99,7 +99,63 @@ impl Ring {
         Some(self.data.range(from..to).copied().collect())
     }
 
+    /// The replay from `from` to the end as (offset, bytes) pieces. A block
+    /// (the bytes between two boundaries) with more than `max_lines` lines
+    /// keeps its first `keep_head` bytes (its prompt and command hooks) and
+    /// its last `max_lines` lines; the lines in between are left out, cut at
+    /// line starts. Terminals keep a limited number of rows per block anyway,
+    /// so this saves parsing output they would drop.
+    pub fn replay_pieces(&self, from: u64, keep_head: usize, max_lines: usize) -> Vec<(u64, Vec<u8>)> {
+        let end = self.end();
+        let from = from.max(self.start);
+        let mut cuts: Vec<u64> = self.boundaries.iter().copied().filter(|&b| b > from && b < end).collect();
+        cuts.push(end);
+        let mut pieces: Vec<(u64, Vec<u8>)> = Vec::new();
+        let push = |pieces: &mut Vec<(u64, Vec<u8>)>, start: u64, stop: u64| {
+            if start >= stop {
+                return;
+            }
+            let bytes = self.slice(start, stop).unwrap_or_default();
+            // Merge with the previous piece when contiguous.
+            match pieces.last_mut() {
+                Some((off, prev)) if *off + prev.len() as u64 == start => prev.extend(bytes),
+                _ => pieces.push((start, bytes)),
+            }
+        };
+        let mut start = from;
+        for stop in cuts {
+            match self.tail_lines_start(start, stop, max_lines) {
+                Some(tail) if tail > start + keep_head as u64 => {
+                    let head_end = self.next_line_start(start + keep_head as u64, tail);
+                    let head_end = if head_end == start + keep_head as u64 { start + keep_head as u64 } else { head_end };
+                    push(&mut pieces, start, head_end.min(tail));
+                    push(&mut pieces, tail, stop);
+                }
+                _ => push(&mut pieces, start, stop),
+            }
+            start = stop;
+        }
+        pieces
+    }
+
+    /// Where the last `max_lines` lines of `start..stop` begin, if it has more.
+    fn tail_lines_start(&self, start: u64, stop: u64, max_lines: usize) -> Option<u64> {
+        let begin = (start - self.start) as usize;
+        let end = (stop - self.start) as usize;
+        let mut lines = 0;
+        for (i, &b) in self.data.range(begin..end).enumerate().rev() {
+            if b == b'\n' && begin + i + 1 < end {
+                lines += 1;
+                if lines == max_lines {
+                    return Some(start + i as u64 + 1);
+                }
+            }
+        }
+        None
+    }
+
     /// Bytes from `offset` to the end. `offset` must satisfy `contains`.
+    #[cfg(test)]
     pub fn slice_from(&self, offset: u64) -> Vec<u8> {
         let skip = (offset.saturating_sub(self.start)) as usize;
         self.data.range(skip.min(self.data.len())..).copied().collect()
@@ -109,6 +165,30 @@ impl Ring {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_pieces_cut_the_middle_of_long_blocks() {
+        let mut r = Ring::new(1 << 20);
+        r.push(b"PROMPT$ cmd\n");
+        for i in 0..100 {
+            r.push(format!("line {i}\n").as_bytes());
+        }
+        let b = r.end();
+        r.add_boundary(b);
+        r.push(b"PROMPT$ next\n");
+        let pieces = r.replay_pieces(0, 8, 5);
+        let text: Vec<String> = pieces.iter().map(|(_, b)| String::from_utf8_lossy(b).into_owned()).collect();
+        assert_eq!(text[0], "PROMPT$ cmd\n", "head kept up to the next line start");
+        assert!(text[1].starts_with("line 95\n"), "then the last lines: {:?}", text[1]);
+        assert!(text[1].ends_with("PROMPT$ next\n"), "and the next (short) block whole");
+        // Offsets are the real ones, so the pieces line up with the ring.
+        for (off, bytes) in &pieces {
+            assert_eq!(r.slice(*off, off + bytes.len() as u64).unwrap(), *bytes);
+        }
+        assert_eq!(pieces.last().map(|(o, b)| o + b.len() as u64), Some(r.end()));
+        // Short replays come back whole.
+        assert_eq!(r.replay_pieces(b, 8, 5), vec![(b, b"PROMPT$ next\n".to_vec())]);
+    }
 
     #[test]
     fn wraps_and_tracks_offsets() {

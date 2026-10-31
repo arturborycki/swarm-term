@@ -521,7 +521,9 @@ async fn replay_reopens_a_command_whose_start_was_trimmed() {
     assert!(chunks[1].starts_with(&header), "then the trimmed command's Precmd and Preexec; got {:?}", String::from_utf8_lossy(&chunks[1][..chunks[1].len().min(300)]));
     let rest: Vec<u8> = chunks[2..].concat();
     assert!(rest.starts_with(b"line\r\n"), "the kept output starts on a whole line");
-    assert!(total > 15_000_000, "the command's kept output is replayed, got {total} bytes");
+    // The block keeps its head and its last 50,000 lines (what a terminal
+    // keeps per block), not all 16 MB.
+    assert!(total > 250_000 && total < 2_000_000, "the command's tail is replayed, got {total} bytes");
 }
 
 #[tokio::test]
@@ -627,4 +629,54 @@ async fn full_attach_to_a_full_screen_app_ends_with_its_screen() {
     assert!(last.starts_with(b"\x1b[?1049h"), "last replayed frame is the screen snapshot");
     let text = String::from_utf8_lossy(&last);
     assert!(text.contains("ALT-SCREEN-MARK"), "snapshot shows the app's screen: {text:?}");
+}
+
+/// Keystroke round trip through daemon and shim (client → swarmd → shim →
+/// pty → `cat` → back). Run with `--ignored --nocapture` to see the numbers.
+#[tokio::test]
+#[ignore]
+async fn bench_keystroke_round_trip() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let mut opts = sh_opts("latency");
+    opts.command = vec!["/bin/cat".into()];
+    let info = c.create(opts).await.unwrap();
+    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    let mut samples = Vec::new();
+    for i in 0..300 {
+        let ch = [b'a' + (i % 26) as u8];
+        let t = std::time::Instant::now();
+        a.input(ch.to_vec()).await.unwrap();
+        loop {
+            match a.recv().await {
+                Some(StreamEvent::Output { data, .. }) if data.contains(&ch[0]) => break,
+                Some(_) => {}
+                None => panic!("stream closed"),
+            }
+        }
+        samples.push(t.elapsed());
+    }
+    samples.sort();
+    let pct = |p: usize| samples[samples.len() * p / 100];
+    eprintln!("keystroke round trip: p50 {:?}, p90 {:?}, p99 {:?}", pct(50), pct(90), pct(99));
+}
+
+/// New session to first prompt (`/bin/sh`, so no rc files). Run with
+/// `--ignored --nocapture` to see the numbers.
+#[tokio::test]
+#[ignore]
+async fn bench_new_session_to_prompt() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let mut samples = Vec::new();
+    for i in 0..20 {
+        let t = std::time::Instant::now();
+        let info = c.create(sh_opts(&format!("new-{i}"))).await.unwrap();
+        let mut a = c.attach(&info.id, AttachMode::Full, None, false).await.unwrap();
+        read_until(&mut a, "$ ").await;
+        samples.push(t.elapsed());
+        c.remove(&info.id).await.unwrap();
+    }
+    samples.sort();
+    eprintln!("new session to prompt: p50 {:?}, p90 {:?}, max {:?}", samples[10], samples[18], samples[19]);
 }
