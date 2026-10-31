@@ -277,7 +277,14 @@ Order: 1 → 2 → 10 → 4 → 6 → 3 → 5 → 7 → 8 → 9.
 
 **Swarm, not Warp, in the UI (2026-10-30).** About 125 user-visible strings that mean "this app" now say Swarm: banners ("Did you know that Swarm can directly display Markdown files?" / "View in Swarm"), notifications, window titles, menus, settings and dialogs. Text about Warp's own services (Warp AI/Agent/Drive, plans, billing, teams, referrals, Warp's servers and plugins, privacy policy) keeps the Warp name and will be hidden with those features. Telemetry, logs and internal identifiers are unchanged to keep the upstream diff small.
 
-**Naming sessions (2026-10-30).** Renaming a tab (tab menu, double-click, or the palette's "Rename the Current Tab") names its daemon session (`PaneGroup::set_title` → `daemon::name_sessions`), so the name shows in `swarmctl ls` and the detached menu, and a reopened or reattached tab is titled with it. Verified in the app: rename → `swarmctl ls` shows "nightly-backup" → quit → relaunch → the tab is titled "nightly-backup". Not yet: `swarmctl rename` doesn't retitle an open tab live. Named groups of tabs (like "Demo" / "Work") are planned next.
+**Naming sessions (2026-10-30).** Renaming a tab (tab menu, double-click, or the palette's "Rename the Current Tab") names its daemon session (`PaneGroup::set_title` → `daemon::name_sessions`), so the name shows in `swarmctl ls` and the detached menu, and a reopened or reattached tab is titled with it. Verified in the app: rename → `swarmctl ls` shows "nightly-backup" → quit → relaunch → the tab is titled "nightly-backup". Not yet: `swarmctl rename` doesn't retitle an open tab live.
+
+**Session groups (2026-10-30).** Named groups of sessions (like "Demo" / "Work") are Warp's tab groups (`FeatureFlag::GroupedTabs`, on by default): "New group with tab", "Move to group", "New tab in group", rename, ungroup, collapse, pin and colors all come from Warp. Swarm makes a group part of its sessions:
+- Every time the app saves its state, `swarm::sync_session_groups` stores each terminal's group on its daemon session as `group=<name>` (or `#<group id>` for an unnamed group). Only changes are sent, and leaving a group removes the key.
+- Reopening or reattaching a tab (`Workspace::add_swarm_tab`) puts it back in the group of that name, creating the group if needed. A tab that had no group is taken back out of the group Warp would otherwise have it inherit from the active tab.
+- Groups are per session, so they work the same for remote sessions, and `swarmctl info`/`meta` show and set them.
+- Fixed while testing: after "New group with tab" the name editor lost focus to the new tab's pane, so typed text went to the shell. The rename now starts once the pane has focus.
+Verified in the app: create "builds" with two tabs, quit → relaunch → "builds" comes back with the same two tabs, a loose tab stays loose, an unnamed group stays its own group, and "Ungroup tabs" removes `group` from the sessions.
 
 Known issues (investigated 2026-10-30):
 - **Folder chip shows `/Users/<me>` instead of `~` after reattach.** The replayed `Precmd` hooks are processed before the session finishes bootstrapping (Sessions handles `Bootstrapped` asynchronously), so the prompt is first computed without a session. The stored and replayed Warp session ids match, and re-running `refresh_warp_prompt` on `SessionBootstrapped` didn't help, so the input's folder chip is cached elsewhere (`context_chips/directory_fetcher.rs` path). Cosmetic; paths are correct.
@@ -292,6 +299,7 @@ Known issues (investigated 2026-10-30):
 - **Settings** lists only Swarm's own pages: Appearance, Features, Keyboard shortcuts, Warpify, Privacy, Editor and Code Review, About (`swarm::shows_settings_section`). Account/sign-up/plans, Agents, Billing, Cloud platform, Teams, Referrals, Shared blocks and Warp Drive are gone, and any request for a hidden page (Cmd+, defaults to Account in Warp) opens Appearance.
 - The palette no longer offers Warp's Oz cloud-agent CLI install; "Warp completions" is "Swarm completions".
 - The debug-build "Lines: … Size: …" block footer is off in Swarm.
+- "Share session" (live sharing through Warp's servers) is gone from the tab, pane and terminal menus (`swarm::DISABLED_WARP_FEATURES`, plus a direct check, because the flag was still being turned on after startup).
 
 Next for Settings: the Sessions, Daemon and Hosts pages from the mockup (§9b).
 
@@ -314,6 +322,8 @@ Verified against the Linux VM (`orb`):
 - Killing the app's ssh connection: "connection to daemon lost" → "reconnected … after 1 attempt(s)" about 6 s later.
 
 **Reopening remote tabs at launch.** A successful Connect remembers the host alias in `$STATE_DIR/hosts`. The first window of a run then asks each remembered host, in the background, for running sessions marked to reopen that nothing is attached to (`daemon::reopenable_sessions`, 20 s timeout) and adds them as tabs, keeping focus on the current tab; unreachable hosts are skipped and logged. This is simpler than the earlier "Reconnect to <host>" prompt idea, and closing a remote tab still means "don't reopen". Verified with the VM: open a remote tab → quit → relaunch → the remote session comes back as a tab next to the local one.
+
+**Local or remote is decided by the daemon, not the hostname (2026-10-30).** Warp guesses a remote session when the shell's hostname differs from the Mac's, which misfires when macOS changes its own hostname (e.g. `Mac.localdomain` vs `MacBook-Pro-5.local`): local tabs were treated as remote. With daemon sessions the spawner knows which daemon a session lives on and records it (`daemon::set_session_locality`), and `determine_session_type` asks that first. Remote tabs are titled by host alias until named.
 
 **Not done yet:** Linux binaries bundled for one-click install on Linux hosts; no "Reconnecting…" indicator on the tab; host labels and colors on tabs; remote session labels use the shell's window title, which bash sets to the last command.
 
