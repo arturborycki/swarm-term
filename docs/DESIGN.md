@@ -323,6 +323,22 @@ Verified in the app:
 
 Testing note: macOS permission prompts (UserNotificationCenter) float above other windows and take keyboard focus. While one was up, synthetic clicks under it and all keystrokes went to the prompt, which looked like dead buttons and missing focus in Swarm.
 
+### Menus (built 2026-10-30)
+
+Swarm's menu bar (`app_menus.rs`, under `SWARM_CHROME`):
+- **App:** About Swarm, Settings (⌘,), Keyboard Shortcuts, Appearance, Services, Hide Swarm, Set Swarm as Default Terminal, Quit Swarm. Warp's account, referral, resource center, changelog and privacy items are gone, and warpui's standard items no longer say "Warp".
+- **File:** New Window, New Session (⌘T), New Session on ▸ (This Mac, then each remembered host), New File, Launch Configurations, Connect to Host…, Detached Sessions…, Open Repository, Close Tab (⌘W; the session keeps running), Close Window. "New Agent Tab" and "Reopen closed session" are gone.
+- **View:** Show or Hide Sessions Sidebar, then Warp's palettes, panels and zoom.
+- **Session** (Warp's Tab menu): Rename Session…, splits, moving and switching tabs, closing.
+- **Window** and **Help**. Help links to the GitHub repo, design notes and issues. The AI and Drive menus are not shown.
+
+Swarm items act on the active window through a `root_view:workspace_action` global action. Verified with real clicks:
+- File → Connect to Host… opens the hosts list.
+- File → New Session on ▸ orb opens a new session on the VM.
+- View → Show or Hide Sessions Sidebar switches between sidebar and tabs.
+
+As in Warp, menu shortcuts like ⌘, need a focused view in the window; they do nothing (the item is disabled) when nothing in the window has focus.
+
 ### Sidebar or tabs (built 2026-10-30)
 
 The sidebar button (⌘B) switches between the two layouts from §9b. With the sidebar shown, sessions are listed in it (Warp's vertical tabs panel). With it hidden, sessions become tabs across the title bar (Warp's horizontal tab bar), and the button stays at the left of the title bar to bring the sidebar back. Implemented by having the toggle switch Warp's `use_vertical_tabs` setting, so every part of Warp's layout follows, and the choice is remembered. The Swarm title bar controls (Connect…, N detached) appear in both layouts. Verified in the app: sidebar → tabs → sidebar.
