@@ -390,7 +390,7 @@ Verified against the Linux VM (`orb`):
 
 **Remote bash titles (fixed 2026-10-30).** Remote bash tabs showed odd titles like "..nset _hostname _user _msg". bash-preexec passes the command from `history 1`, and Warp's in-band commands (completions etc.) are kept out of history, so when one ran, the title hook set the title to the previous history entry: the setup script's last line, or your last command. `warp_set_title_active_on_preexec` in `bash_body.sh` now skips commands whose `$BASH_COMMAND` is one of Warp's own (`warp_*`), as `warp_preexec` already does. Verified: a new `orb` session stays `swarm-test:~` after commands and background activity. Sessions set up before the fix keep the old function until re-warpified.
 
-**Not done yet:** no "Reconnecting…" indicator on the tab; host labels and colors on tabs; remote session labels use the shell's window title, which bash sets to the last command.
+**Since done:** the reconnecting mark, host colors and readable remote bash titles (see the sections below). **Not done yet:** connecting to a host that isn't in `~/.ssh/config` (a `user@host[:port]` field, §3a); remote sessions set up before the bash title fix keep stale titles until re-warpified.
 
 ### What to change in the Warp fork
 1. **Add `daemon_tty::TerminalManager`** as a third implementation of the `TerminalManager` trait, modeled on `remote_tty`. Instead of a websocket it uses `swarm-client` (our protocol over a unix socket or ssh stdio), and it maps `Message::Input` / `Resize` onto `Input` / `Resize` frames. Everything above it (grid, blocks, input editor, rendering) stays unchanged.
