@@ -341,7 +341,18 @@ As in Warp, menu shortcuts like ⌘, need a focused view in the window; they do 
 
 ### Glass window (2026-10-30)
 
-Swarm defaults to a translucent, blurred window: background opacity 88% and blur radius 24 (Warp's own settings, `window_settings.rs`). Users can change both in Settings → Appearance, and a stored value wins over the default. Still to do for the look in the mockups: a first-run sheet, the menu bar extra, the session switcher popover, a Swarm logo on the About page (it still shows Warp's), and state dots in the sidebar.
+Swarm defaults to a translucent, blurred window: background opacity 88% and blur radius 24 (Warp's own settings, `window_settings.rs`). Users can change both in Settings → Appearance, and a stored value wins over the default.
+
+### Session marks, picker, menu bar extra, first run (built 2026-10-30)
+
+- **Sidebar marks.** Each terminal row shows a dot from the daemon's live session list (`SwarmSessions::mark_for`, by Warp session id): green while a command runs (the shim's foreground process), gray once the session exited, blue when another client is attached too. Idle shells get none. Verified: `sleep 30` shows green and clears when it ends; `swarmctl attach` from a terminal shows blue.
+- **Launch focus fix.** At launch every reattached tab replayed at once, and each terminal focused itself when its bootstrap block appeared, so focus ended in a hidden tab (typing went to that session). Now only a terminal in the active tab takes focus that way, and regrouping reattached tabs no longer moves focus. Verified: typing right after launch lands in the visible tab.
+- **Session picker.** The navigation palette (⇧⌘P, File → Open Session…) lists, next to Warp's open tabs, "Reattach <name>" for every detached session on this Mac and remembered hosts (with host, cwd and foreground command) and "New session on <host>". It filters as you type, and Return opens the entry (`search/command_palette/swarm_sessions.rs`). Verified: a `swarmctl new -d` session found by typing "palette", then reattached with Warp's setup applied.
+- **Menu bar extra.** A status item (SF Symbol `terminal`; warpui gained `set_status_menu_builder`) lists the sessions on This Mac and under Remote Hosts with their state. Choosing one shows its tab in whichever window has it, or reattaches it. It also has New Session, Open Swarm, Settings… and Quit Swarm. Verified: choosing a session switched to its tab; with every window closed, Open Swarm reopened a window with all 5 sessions.
+- **First run.** On the first launch for a state dir (`$STATE_DIR/first-run-done`), a sheet explains that closing or quitting doesn't stop sessions. It asks when the daemon starts: With Swarm (recommended), When I Log In (`swarmd service install`), or Connect to a Server… (the hosts list). warpui alerts gained an option to drop the "Don't ask again" checkbox; Swarm's own dialogs don't show it.
+- **About** shows Swarm's icon, name and version.
+
+Not done: a Sessions settings page, host colors on tabs, a "Reconnecting…" mark.
 
 ### Sidebar or tabs (built 2026-10-30)
 
