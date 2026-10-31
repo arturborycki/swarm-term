@@ -390,7 +390,13 @@ Verified against the Linux VM (`orb`):
 
 **Remote bash titles (fixed 2026-10-30).** Remote bash tabs showed odd titles like "..nset _hostname _user _msg". bash-preexec passes the command from `history 1`, and Warp's in-band commands (completions etc.) are kept out of history, so when one ran, the title hook set the title to the previous history entry: the setup script's last line, or your last command. `warp_set_title_active_on_preexec` in `bash_body.sh` now skips commands whose `$BASH_COMMAND` is one of Warp's own (`warp_*`), as `warp_preexec` already does. Verified: a new `orb` session stays `swarm-test:~` after commands and background activity. Sessions set up before the fix keep the old function until re-warpified.
 
-**Since done:** the reconnecting mark, host colors and readable remote bash titles (see the sections below). **Not done yet:** connecting to a host that isn't in `~/.ssh/config` (a `user@host[:port]` field, §3a); remote sessions set up before the bash title fix keep stale titles until re-warpified.
+**Since done:** the reconnecting mark, host colors and readable remote bash titles (see the sections below).
+
+**Hosts outside `~/.ssh/config` (2026-10-30).** Typing `user@host` or a dotted host name in the session picker (⇧⌘P) offers "Connect to …". Connect… also ends with "Other Host…", which opens the picker. Input with spaces, or anything that could act as an ssh option (leading `-`, `=`, …), isn't offered. The address goes through the normal connect flow: ssh check, install offer, then the host's sessions. A failed connection shows ssh's own error and isn't remembered. Verified with `nobody@example.invalid` ("Could not resolve hostname"). Ports need an `~/.ssh/config` entry; `user@host:port` isn't parsed.
+
+**Not done yet:** remote sessions set up before the bash title fix keep stale titles until re-warpified.
+
+**Unit tests.** The fork's `warp` library tests now build and pass for Swarm's own changes. Under test, daemon sessions are off and Warp's service hiding is off, so sharing stays covered. Upstream runs these with `cargo nextest`, one process per test. Under a single-process `cargo test`, 12 upstream tests (terminal view, notebooks, telemetry, …) fail from shared global state, and each passes on its own.
 
 ### What to change in the Warp fork
 1. **Add `daemon_tty::TerminalManager`** as a third implementation of the `TerminalManager` trait, modeled on `remote_tty`. Instead of a websocket it uses `swarm-client` (our protocol over a unix socket or ssh stdio), and it maps `Message::Input` / `Resize` onto `Input` / `Resize` frames. Everything above it (grid, blocks, input editor, rendering) stays unchanged.
