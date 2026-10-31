@@ -14,16 +14,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 PROFILE=debug
-CARGO_PROFILE=()
+RELEASE_FLAG=""
 if [ "${1:-}" = "--release" ]; then
     PROFILE=release
-    CARGO_PROFILE=(--release)
+    RELEASE_FLAG="--release"
 fi
-cargo build -q "${CARGO_PROFILE[@]}" -p swarmd -p swarm-shim -p swarmctl
+# shellcheck disable=SC2086 # empty when debug
+cargo build -q $RELEASE_FLAG -p swarmd -p swarm-shim -p swarmctl
 
 APP="$ROOT/app/target/$PROFILE/bundle/osx/Swarm.app"
 rm -rf "$APP"
-(cd app/app && cargo bundle "${CARGO_PROFILE[@]}" --bin swarm --features gui >/dev/null)
+# shellcheck disable=SC2086
+(cd app/app && cargo bundle $RELEASE_FLAG --bin swarm --features gui >/dev/null)
 (cd app && ./script/macos/add_framework_rpath "$APP/Contents/MacOS/swarm" >/dev/null)
 (cd app && SKIP_SETTINGS_SCHEMA=1 NO_LICENSES=1 ./script/prepare_bundled_resources "$APP/Contents/Resources" oss >/dev/null)
 for bin in swarmd swarm-shim swarmctl; do
