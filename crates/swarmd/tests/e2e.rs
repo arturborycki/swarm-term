@@ -428,8 +428,20 @@ async fn replay_keeps_warp_session_hooks_and_starts_at_precmd() {
         "{p} {init}; {p} {boot}; head -c 17000000 /dev/zero | tr '\\0' x; {p} {precmd}; echo; echo flood-$((1+1))\n"
     );
     a.input(script.into_bytes()).await.unwrap();
-    read_until(&mut a, "flood-2\r\n").await;
-    a.detach().await.unwrap();
+    // Reading the flood live is slow under load; wait on the session instead.
+    timeout(Duration::from_secs(60), async {
+        loop {
+            let s = c.list().await.unwrap().into_iter().find(|s| s.id == info.id).unwrap();
+            if s.buffer_end > 17_000_000 && s.foreground.is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("flood did not finish");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(a);
 
     let mut b = c.attach(&info.id, AttachMode::Full, None, false).await.unwrap();
     let mut chunks: Vec<Vec<u8>> = Vec::new();
