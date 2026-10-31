@@ -356,7 +356,13 @@ Swarm defaults to a translucent, blurred window: background opacity 88% and blur
 - **Host colors.** A remote session's tab takes its host's color (a fixed hash of the host name over cyan, magenta, yellow, green and blue; no red, which reads as an error), unless the tab already has a color. It can be changed from the tab menu.
 - **Settings → Sessions.** Lists every session on this Mac and the followed hosts, live: name, folder, state (idle, running <cmd>, exited <code>), open/detached/open in N places, last activity, and how much scrollback is kept. Terminate sends SIGHUP after a confirmation, Remove drops an exited session, and "Remove Exited Sessions" clears them all. Verified: removed an exited session holding a full 16 MB buffer, terminated a session (its tab closed), then bulk-removed it.
 
-Testing note: a test client fed `/dev/zero` into a session, and the NULs left its zsh producing output endlessly (84 MB in total). Parsing that flood blocked the window. Terminating the session fixed it. A guard against runaway output in one tab is still to do.
+**Output floods (checked 2026-10-30).** An earlier "frozen window" turned out to be the first-run sheet: a test script had moved the sheet instead of the main window, and the modal blocked input. Floods themselves don't block the UI:
+- During `yes | head -c 300000000` in one tab, the main thread answered in 0.13 s (parsing used about two cores), and switching tabs worked mid-flood.
+- Relaunching with a full 16 MB buffer to replay: the window responded after 1.4 s and parsing was done within about 2 s.
+
+**Replay of a command whose start was trimmed: fixed.** When a command printed more than the 16 MB buffer, the ring dropped its start, including Warp's Precmd/Preexec hooks. Replay began at the next prompt boundary, so the reattached tab showed none of that output. The shim now keeps the last 64 commands' block headers (Precmd + Preexec bytes). On a full attach, if the buffer starts inside a command's output, replay starts at the first whole line in the buffer and the prelude sends that command's header, so Warp reopens the block. Tested by `replay_reopens_a_command_whose_start_was_trimmed` (e2e) and in the app: after `seq 1 3000000; echo tail-marker` and a relaunch, the tab shows the last 16 MB ending in `tail-marker`. A flood with no command hooks (e.g. before bootstrap) still replays from the next prompt, as before.
+
+Note: `attach_size_resizes_the_pty` failed once while running in parallel with the 24 MB flood test, then passed 3 times alone and in a full run. It's timing-sensitive under load.
 
 ### Sidebar or tabs (built 2026-10-30)
 

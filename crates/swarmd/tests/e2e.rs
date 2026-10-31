@@ -445,3 +445,60 @@ async fn replay_keeps_warp_session_hooks_and_starts_at_precmd() {
     let rest: Vec<u8> = chunks[2..].concat();
     assert!(rest.starts_with(format!("\x1bP$d{precmd}").as_bytes()), "replay must start at the Precmd hook");
 }
+
+#[tokio::test]
+async fn replay_reopens_a_command_whose_start_was_trimmed() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let info = c.create(sh_opts("trimmed")).await.unwrap();
+    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    let init = hex(r#"{"hook": "InitShell", "value": {"session_id": 42}}"#);
+    let precmd = hex(r#"{"hook": "Precmd", "value": {"session_id": 42}}"#);
+    let preexec = hex(r#"{"hook": "Preexec", "value": {"command": "yes | head"}}"#);
+    let p = r"printf '\033P$d%s\033\\'";
+    // A command printing more than the 16 MB buffer, then the next prompt.
+    let script = format!(
+        "{p} {init}; {p} {precmd}; {p} {preexec}; yes line | head -c 20000000; {p} {precmd}; echo flood-$((1+1))\n"
+    );
+    a.input(script.into_bytes()).await.unwrap();
+    // The live client falls behind during the flood; wait on the session.
+    timeout(Duration::from_secs(60), async {
+        loop {
+            let s = c.list().await.unwrap().into_iter().find(|s| s.id == info.id).unwrap();
+            if s.buffer_end > 24_000_000 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("flood did not finish");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(a);
+
+    let mut b = c.attach(&info.id, AttachMode::Full, None, false).await.unwrap();
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    let mut total = 0usize;
+    timeout(Duration::from_secs(20), async {
+        while let Some(ev) = b.recv().await {
+            if let StreamEvent::Output { data, replay: true, .. } = ev {
+                total += data.len();
+                let done = String::from_utf8_lossy(&data).contains("flood-2\r\n");
+                chunks.push(data);
+                if done {
+                    return;
+                }
+            }
+        }
+    })
+    .await
+    .expect("replay did not finish");
+    let hook = |hex: &str| format!("\x1bP$d{hex}\x1b\\").into_bytes();
+    let head = |c: &[u8]| String::from_utf8_lossy(&c[..c.len().min(200)]).into_owned();
+    assert!(chunks[0].starts_with(&hook(&init)), "first comes the kept InitShell hook; got {:?} ({} chunks, {total} bytes, from {})", head(&chunks[0]), chunks.len(), b.replay_from);
+    let header = [hook(&precmd), hook(&preexec)].concat();
+    assert!(chunks[1].starts_with(&header), "then the trimmed command's Precmd and Preexec; got {:?}", String::from_utf8_lossy(&chunks[1][..chunks[1].len().min(300)]));
+    let rest: Vec<u8> = chunks[2..].concat();
+    assert!(rest.starts_with(b"line\r\n"), "the kept output starts on a whole line");
+    assert!(total > 15_000_000, "the command's kept output is replayed, got {total} bytes");
+}

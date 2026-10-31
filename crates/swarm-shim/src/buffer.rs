@@ -70,6 +70,21 @@ impl Ring {
         self.boundaries.front().copied().unwrap_or(self.start)
     }
 
+    /// The offset just after the first `\n` in `from..until`, or `from` if
+    /// there is none (so a replay starting there begins on a whole line).
+    pub fn next_line_start(&self, from: u64, until: u64) -> u64 {
+        if from < self.start || from >= until {
+            return from;
+        }
+        let begin = (from - self.start) as usize;
+        let end = ((until.min(self.end())) - self.start) as usize;
+        self.data
+            .range(begin..end)
+            .position(|&b| b == b'\n')
+            .map(|i| from + i as u64 + 1)
+            .unwrap_or(from)
+    }
+
     pub fn contains(&self, offset: u64) -> bool {
         offset >= self.start && offset <= self.end()
     }

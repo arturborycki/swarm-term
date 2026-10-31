@@ -37,10 +37,25 @@ pub struct Session {
 /// a replay can still start with them after the ring has dropped them.
 const STICKY_HOOKS: [&str; 2] = ["InitShell", "Bootstrapped"];
 
+/// The hooks that open a Warp block (`Precmd`, then `Preexec` with the
+/// command), so a replay that starts inside that block's output can reopen it.
+struct BlockHeader {
+    precmd_at: u64,
+    preexec_at: u64,
+    bytes: Vec<u8>,
+}
+
+/// How many recent block headers are kept.
+const BLOCK_HEADERS: usize = 64;
+
 struct Inner {
     ring: Ring,
     /// Latest `InitShell` / `Bootstrapped` hook: (offset, complete bytes).
     sticky: Vec<(&'static str, u64, Vec<u8>)>,
+    /// Latest `Precmd` hook (offset, bytes), until its `Preexec` arrives.
+    pending_precmd: Option<(u64, Vec<u8>)>,
+    /// Recent commands' block headers, oldest first.
+    headers: std::collections::VecDeque<BlockHeader>,
     scanner: Scanner,
     info: SessionInfo,
     clients: HashMap<u64, Slot>,
@@ -141,6 +156,8 @@ impl Session {
             inner: Mutex::new(Inner {
                 ring: Ring::new(scrollback),
                 sticky: Vec::new(),
+                pending_precmd: None,
+                headers: Default::default(),
                 scanner: Scanner::default(),
                 info,
                 clients: HashMap::new(),
@@ -204,6 +221,22 @@ impl Session {
             if hook.name == "Precmd" {
                 // Warp starts a new block here.
                 inner.ring.add_boundary(hook.start);
+            }
+            if hook.name == "Precmd" || hook.name == "Preexec" {
+                if let Some(mut bytes) = inner.ring.slice(hook.start, hook.end.min(inner.ring.end())) {
+                    if bytes.last() == Some(&0x1b) {
+                        bytes.push(b'\\');
+                    }
+                    if hook.name == "Precmd" {
+                        inner.pending_precmd = Some((hook.start, bytes));
+                    } else if let Some((precmd_at, mut header)) = inner.pending_precmd.take() {
+                        header.extend_from_slice(&bytes);
+                        inner.headers.push_back(BlockHeader { precmd_at, preexec_at: hook.start, bytes: header });
+                        if inner.headers.len() > BLOCK_HEADERS {
+                            inner.headers.pop_front();
+                        }
+                    }
+                }
             }
             if let Some(name) = STICKY_HOOKS.iter().find(|n| **n == hook.name) {
                 // `end` stops at the terminator's ESC; the `\` may not be here yet.
@@ -274,11 +307,31 @@ impl Session {
             AttachMode::ResumeFrom(_) => inner.ring.replay_start(),
             AttachMode::Live => inner.ring.end(),
         };
+        let full = matches!(mode, AttachMode::Full) || (matches!(mode, AttachMode::ResumeFrom(o) if !inner.ring.contains(o)));
+        // The ring may have dropped the start of a command whose output it
+        // still holds; replaying from the first boundary would skip that
+        // output. Start at the first whole line instead, after the hooks that
+        // reopen the command's block.
+        let mut reopened_block = None;
+        let mut replay_from = replay_from;
+        if full && replay_from > inner.ring.start() {
+            let start = inner.ring.start();
+            let cut = inner.headers.iter().rposition(|h| h.preexec_at < start);
+            let still_running_at_start =
+                cut.is_some_and(|i| inner.headers.get(i + 1).is_none_or(|next| next.precmd_at >= start));
+            if let Some(i) = cut.filter(|_| still_running_at_start) {
+                let header = &inner.headers[i];
+                replay_from = inner.ring.next_line_start(start, replay_from);
+                reopened_block = Some((header.preexec_at, header.bytes.clone()));
+            }
+        }
         let live_from = inner.ring.end();
         let replay = inner.ring.slice_from(replay_from);
-        let full = matches!(mode, AttachMode::Full) || (matches!(mode, AttachMode::ResumeFrom(o) if !inner.ring.contains(o)));
         let prelude = if full {
-            inner.sticky.iter().filter(|(_, off, _)| *off < replay_from).map(|(_, off, b)| (*off, b.clone())).collect()
+            let mut prelude: Vec<(u64, Vec<u8>)> =
+                inner.sticky.iter().filter(|(_, off, _)| *off < replay_from).map(|(_, off, b)| (*off, b.clone())).collect();
+            prelude.extend(reopened_block);
+            prelude
         } else {
             Vec::new()
         };
