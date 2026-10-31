@@ -37,7 +37,17 @@ if [ -d "$ROOT/target/linux" ]; then
 else
     echo "note: no Linux builds (scripts/build-linux.sh); Linux hosts can't get swarmd from this app" >&2
 fi
+# A stable identity keeps the permissions macOS grants Swarm (notifications,
+# badges) across rebuilds; an ad-hoc signature looks like a new app each time.
 SIGNING_CERT="$(security find-identity -p codesigning -v | grep "Apple Development" | awk '{print $2}' | head -1 || true)"
-codesign --force --deep --options runtime --sign "${SIGNING_CERT:--}" "$APP" \
-    --entitlements app/script/Debug-Entitlements.plist >/dev/null 2>&1
+sign() {
+    codesign --force --deep --options runtime --sign "$1" "$APP" \
+        --entitlements app/script/Debug-Entitlements.plist >/dev/null 2>&1
+}
+if [ -n "$SIGNING_CERT" ] && sign "$SIGNING_CERT"; then
+    :
+else
+    [ -n "$SIGNING_CERT" ] && echo "note: signing with $SIGNING_CERT failed (keychain locked?); signing ad-hoc" >&2
+    sign -
+fi
 echo "$APP"
