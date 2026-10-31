@@ -301,7 +301,27 @@ Known issues (investigated 2026-10-30):
 - The debug-build "Lines: … Size: …" block footer is off in Swarm.
 - "Share session" (live sharing through Warp's servers) is gone from the tab, pane and terminal menus (`swarm::DISABLED_WARP_FEATURES`, plus a direct check, because the flag was still being turned on after startup).
 
-Next for Settings: the Sessions, Daemon and Hosts pages from the mockup (§9b).
+Next for Settings: the Sessions page from the mockup (§9b).
+
+### Settings: Daemon and Hosts (built 2026-10-30)
+
+Two Swarm pages lead the Settings sidebar (`settings_view/swarm_pages.rs`):
+- **Daemon** shows this Mac's `swarmd`: version, hostname, OS/CPU, and live session counts from the `SwarmSessions` model. It has:
+  - "Start the daemon at login", which runs `swarmd service install|uninstall` and reads `swarmd service status`;
+  - "Restart daemon": `Shutdown`, then reconnect, which starts it again;
+  - "Open logs" (the log dir in Finder) and "Refresh".
+  Status is re-read whenever the page is opened.
+- **Hosts** lists the remembered hosts (`$STATE_DIR/hosts`). Each host is checked over ssh when the page is opened (not at launch): reachable or ssh's error, swarmd installed, version, session counts. Each host has:
+  - an at-login switch (`swarmd service …` over ssh);
+  - "Install/Reinstall swarmd", offered only when the app has binaries for that host's OS/CPU. It copies to a staging dir and renames into place, so a running daemon's files can be replaced, then restarts the daemon;
+  - "Remove", which stops reopening its sessions and closes the connection; the sessions keep running there.
+
+Verified in the app:
+- Restart daemon → new `swarmd` pid, all 4 sessions kept, every tab "reconnected … after 1 attempt(s)".
+- On the VM, the at-login switch moved `orb` between at-login and with-app, and its session survived both. The Linux unit uses `KillMode=process`, and shims call `setsid`, so stopping the service never takes sessions with it.
+- Remove dropped `orb` from the hosts file and left its session running.
+
+Testing note: macOS permission prompts (UserNotificationCenter) float above other windows and take keyboard focus. While one was up, synthetic clicks under it and all keystrokes went to the prompt, which looked like dead buttons and missing focus in Swarm.
 
 ### Sidebar or tabs (built 2026-10-30)
 
