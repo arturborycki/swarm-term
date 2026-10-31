@@ -578,6 +578,14 @@ One sheet (§3a): daemon start mode, optional "Connect to a server", and a singl
 - Full keyboard navigation of the picker, connect sheet and settings.
 - Respect Reduce Motion (no spinners or animations; static `◐` instead), Increase Contrast, and system accent color.
 
+### Visual work against the mockups (2026-10-31)
+
+- **State marks** (States mockup): each daemon session's sidebar row icon and tab indicator is a shape and a color: ● idle, ◐ running a command, ! needs attention (ended with an error, or its connection was lost for good), ○ exited, ⟳ reconnecting; a small blue dot marks another client attached. On tabs an idle mark yields to Warp's own indicators.
+- **Host groups:** remote sessions without a group of their own open in a group per host, in the host's color; their rows show the shell's title.
+- **Status bar:** under the active session, "This Mac · zsh · ~ · 120×39" and "Only this window" or "Also attached: swarmctl". The app attaches as "Swarm on <this Mac>".
+- **Reconnecting banner:** "Connection to orb lost. Reconnecting — output will resume where it stopped." with Retry Now. Checked against the VM: Retry Now reconnected within a second instead of at the next backoff step.
+- **Still to do:** the sidebar header and footer from the mockup (session count, "N detached" and Connect… at the bottom), the session picker as its own popover (it is the command palette today), the connect sheet's inline checklist, "new output" bolding for background tabs, and the exited banner (an exited session's tab closes today, so there's nothing to show it on).
+
 ### Performance budgets (measured on an M1 MacBook Air)
 | Action | Target |
 |---|---|
@@ -601,6 +609,7 @@ How the reattach budget is met: not by tail-first rendering (Warp's block list c
 
 ### Distribution
 - Universal app (arm64 + x86_64), **macOS 13 Ventura or later** (needed for `SMAppService`).
+- As built: `scripts/bundle-app.sh` signs with an "Apple Development" identity when the keychain has one (a stable identity keeps macOS permissions across rebuilds), else ad-hoc. `scripts/make-dmg.sh` signs and notarizes only with a "Developer ID Application" identity and a notarytool profile; its header lists the one-time setup.
 - Hardened runtime, Developer ID signed and notarized; DMG and Homebrew cask.
 - `swarmd`, `swarm-shim` and `swarmctl` ship inside the bundle (`Contents/MacOS/`). A Settings button installs a `swarmctl` symlink into `/usr/local/bin` or `~/.local/bin`.
 - Updates with Sparkle 2 (EdDSA-signed feed on GitHub Releases). Updating the app never restarts running shims; `swarmd` is restarted and re-adopts them (§3).
@@ -668,9 +677,10 @@ M0–M1 are independent of Warp and de-risk the hard part; M2 is where most of t
     - Light and dark mode: checked. Swarm's title bar, host colors, sidebar dots and Settings pages follow the theme.
     - Keyboard-only: the main flows have shortcuts (⌘T, ⌘O, ⌃⌘H, ⌃⌘S/⌘B, ⌘, and ⌘W), and the menus cover the rest.
     - Reduce Motion: Swarm adds no animations.
-    - VoiceOver: not done. Warp's custom renderer exposes only a minimal accessibility tree, and Swarm's views inherit that.
+    - VoiceOver: Warp announces the focused view, actions and events (`warpui_core::accessibility`). Swarm adds: tab switches read the tab's name, position, host and state ("build, tab 2 of 5, This Mac, running cargo"); sessions that end with an error, lose their connection or reconnect are announced. Not yet checked with VoiceOver running.
   - **Start mode:** uses a launchd agent written by `swarmd service install`, not `SMAppService`. `SMAppService` needs a signed app with an embedded login-item helper; revisit when signing is set up.
-- **M3:** a dropped connection resumes from the last offset (`ResumeFrom`) with no replay or visual reset. This was checked by killing the ssh connection and making the remote daemon unreachable. A real laptop sleep/wake hasn't been tested yet.
+- **M3:** a dropped connection resumes from the last offset (`ResumeFrom`) with no replay or visual reset. This was checked by killing the ssh connection and making the remote daemon unreachable.
+  - **Sleep/wake:** a link that died during sleep looks open until ssh notices (`ServerAliveInterval=10`, 3 misses). On wake and when the network comes back, the app pings each remote daemon; one that doesn't answer within 4 s is dropped (`Client::close`), so its tabs reconnect at once, and tabs already retrying skip the rest of their backoff. Checked by freezing the VM's `swarmd bridge` (SIGSTOP): ssh stayed up, the ping failed in 4 s, and a new connection took 70 ms. A real laptop sleep/wake hasn't been tested.
 - **M4:**
   - **Alt-screen snapshots:** on a full attach, the shim's vt100 model redraws the app's screen.
   - **Tab drag-out:** local tabs can be dragged into their own window; remote tabs only reorder.
