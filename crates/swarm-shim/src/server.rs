@@ -56,6 +56,10 @@ async fn handle(session: Arc<Session>, stream: UnixStream, shutdown: Arc<Notify>
             };
             write_frame(&mut wr, &reply).await
         }
+        ShimRequest::Trim { keep } => {
+            session.trim(keep as usize);
+            write_frame(&mut wr, &ShimMsg::Ok).await
+        }
         ShimRequest::Remove => {
             remove(&session).await;
             write_frame(&mut wr, &ShimMsg::Ok).await?;

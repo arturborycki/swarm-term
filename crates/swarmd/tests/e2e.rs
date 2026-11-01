@@ -15,13 +15,19 @@ use tokio::time::timeout;
 struct Env {
     dir: tempfile::TempDir,
     daemon: Option<Child>,
+    /// Extra environment for the daemon.
+    vars: Vec<(&'static str, String)>,
 }
 
 impl Env {
     async fn new() -> Env {
+        Env::with_vars(Vec::new()).await
+    }
+
+    async fn with_vars(vars: Vec<(&'static str, String)>) -> Env {
         // Short path: sockets must fit in sun_path.
         let dir = tempfile::Builder::new().prefix("sw").tempdir_in("/tmp").unwrap();
-        let mut env = Env { dir, daemon: None };
+        let mut env = Env { dir, daemon: None, vars };
         env.start_daemon().await;
         env
     }
@@ -36,6 +42,7 @@ impl Env {
             .env("SWARM_RUNTIME_DIR", self.runtime())
             .env("SWARM_STATE_DIR", self.dir.path().join("state"))
             .env("SWARM_SHIM_PATH", env!("CARGO_BIN_EXE_swarm-shim"))
+            .envs(self.vars.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -435,7 +442,7 @@ async fn replay_keeps_warp_session_hooks_and_starts_at_precmd() {
     let env = Env::new().await;
     let c = env.client().await;
     let info = c.create(sh_opts("hooks")).await.unwrap();
-    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    let a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
     let init = hex(r#"{"hook": "InitShell", "value": {"session_id": 42}}"#);
     let boot = hex(r#"{"hook": "Bootstrapped", "value": {"session_id": 42}}"#);
     let precmd = hex(r#"{"hook": "Precmd", "value": {"session_id": 42}}"#);
@@ -490,7 +497,7 @@ async fn replay_reopens_a_command_whose_start_was_trimmed() {
     let env = Env::new().await;
     let c = env.client().await;
     let info = c.create(sh_opts("trimmed")).await.unwrap();
-    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    let a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
     let init = hex(r#"{"hook": "InitShell", "value": {"session_id": 42}}"#);
     let precmd = hex(r#"{"hook": "Precmd", "value": {"session_id": 42}}"#);
     let preexec = hex(r#"{"hook": "Preexec", "value": {"command": "yes | head"}}"#);
@@ -699,4 +706,47 @@ async fn bench_new_session_to_prompt() {
     }
     samples.sort();
     eprintln!("new session to prompt: p50 {:?}, p90 {:?}, max {:?}", samples[10], samples[18], samples[19]);
+}
+
+#[tokio::test]
+async fn scrollback_over_the_total_cap_is_trimmed_from_idle_sessions() {
+    // A 6 MB cap; two sessions printing 4 MB each.
+    let env = Env::with_vars(vec![("SWARM_SCROLLBACK_TOTAL", (6u64 << 20).to_string())]).await;
+    let c = env.client().await;
+    let held = |s: &swarm_proto::SessionInfo| s.buffer_end - s.buffer_start;
+    let mut ids = Vec::new();
+    for name in ["old", "new"] {
+        let info = c.create(sh_opts(name)).await.unwrap();
+        let a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+        a.input(b"head -c 4194304 /dev/zero | tr '\\0' x; echo; echo done-$((1+1))\n".to_vec()).await.unwrap();
+        timeout(Duration::from_secs(60), async {
+            while held(&c.list().await.unwrap().into_iter().find(|s| s.id == info.id).unwrap()) < 4 << 20 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("output did not arrive");
+        drop(a);
+        ids.push(info.id);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
+    // The daemon checks every 10 s; the older idle session is trimmed to 1 MB.
+    let trimmed = timeout(Duration::from_secs(30), async {
+        loop {
+            let list = c.list().await.unwrap();
+            let get = |id: &str| list.iter().find(|s| s.id == id).cloned().unwrap();
+            let (old, new) = (get(&ids[0]), get(&ids[1]));
+            if held(&old) <= 1 << 20 {
+                return (old, new);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("the older session was never trimmed");
+    assert!(held(&trimmed.1) > 4_000_000, "the newer session keeps its scrollback");
+    // A full replay of the trimmed session still works and ends with its prompt.
+    let mut a = c.attach(&ids[0], AttachMode::Full, None, false).await.unwrap();
+    let (out, replayed) = read_until(&mut a, "done-2").await;
+    assert!(replayed && out.len() <= 1 << 20, "replay of {} bytes", out.len());
 }

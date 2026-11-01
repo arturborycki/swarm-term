@@ -1,5 +1,6 @@
 //! `swarmd`: the per-user session daemon.
 
+mod memory;
 mod registry;
 mod restore;
 mod server;
@@ -155,6 +156,7 @@ fn run(if_not_running: bool) -> Result<()> {
         let registry = registry::Registry::new(runtime.clone(), shim);
         registry.adopt_existing().await?;
         restore::start(&registry).await;
+        tokio::spawn(memory::run(registry.clone()));
         let shutdown = Arc::new(Notify::new());
         let server = Arc::new(server::Server { registry, shutdown: shutdown.clone() });
         tracing::info!(socket = %sock.display(), "swarmd {} listening", swarm_proto::VERSION);

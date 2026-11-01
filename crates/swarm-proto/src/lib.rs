@@ -207,6 +207,8 @@ pub enum ShimRequest {
     Kill { signal: i32 },
     Remove,
     SetMeta(MetaUpdate),
+    /// Keep only the last `keep` bytes of scrollback (memory is short).
+    Trim { keep: u64 },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

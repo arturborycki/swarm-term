@@ -62,6 +62,25 @@ impl Ring {
         }
     }
 
+    /// Drops all but the last `keep` bytes and releases the memory they used
+    /// (the buffer grows again with new output). Whether anything was dropped.
+    pub fn trim(&mut self, keep: usize) -> bool {
+        let drop = self.data.len().saturating_sub(keep);
+        if drop == 0 {
+            return false;
+        }
+        self.data.drain(..drop);
+        self.data.shrink_to(keep);
+        self.start += drop as u64;
+        while self.boundaries.front().is_some_and(|&b| b < self.start) {
+            self.boundaries.pop_front();
+        }
+        while self.times.front().is_some_and(|&(o, _)| o < self.start) {
+            self.times.pop_front();
+        }
+        true
+    }
+
     pub fn add_time(&mut self, offset: u64, unix_ms: u64) {
         if offset < self.start || self.times.back().is_some_and(|&(o, _)| o >= offset) {
             return;
@@ -283,6 +302,21 @@ mod tests {
             r.with_times(vec![(0, b"HOOK".to_vec())]),
             vec![(0, b"HOOK".to_vec())]
         );
+    }
+
+    #[test]
+    fn trim_keeps_the_tail_and_frees_memory() {
+        let mut r = Ring::new(1 << 20);
+        r.push(&vec![b'x'; 600_000]);
+        r.add_boundary(100);
+        r.add_boundary(599_000);
+        assert!(r.trim(2000));
+        assert_eq!((r.start(), r.end()), (598_000, 600_000));
+        assert!(r.data.capacity() < 600_000, "capacity {}", r.data.capacity());
+        assert_eq!(r.replay_start(), 599_000, "boundaries before the new start are gone");
+        assert!(!r.trim(5000), "nothing to drop");
+        r.push(b"more");
+        assert_eq!(r.slice_from(599_998), b"xxmore");
     }
 
     #[test]

@@ -103,10 +103,10 @@ async fn async_run(cfg: ShimConfig) -> Result<()> {
 
     let fg = session.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        let mut tick = tokio::time::interval(session::ACTIVITY_NOTIFY_INTERVAL);
         loop {
             tick.tick().await;
-            fg.refresh_foreground();
+            fg.refresh();
         }
     });
 

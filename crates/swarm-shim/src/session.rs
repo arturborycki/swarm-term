@@ -19,7 +19,7 @@ use crate::scan::Scanner;
 /// Output chunks a client may have queued before it is considered lagged.
 const CLIENT_QUEUE: usize = 1024;
 /// Activity-only info changes are published at most this often.
-const ACTIVITY_NOTIFY_INTERVAL: Duration = Duration::from_secs(1);
+pub const ACTIVITY_NOTIFY_INTERVAL: Duration = Duration::from_secs(1);
 const NO_LAG: u64 = u64::MAX;
 
 pub struct Session {
@@ -83,6 +83,9 @@ struct Inner {
     clients: HashMap<u64, Slot>,
     next_client: u64,
     last_notify: Instant,
+    /// An activity change was held back by the notify interval; the periodic
+    /// `refresh` publishes it, so the last output's numbers aren't lost.
+    unpublished: bool,
 }
 
 struct Slot {
@@ -191,6 +194,7 @@ impl Session {
                 clients: HashMap::new(),
                 next_client: 1,
                 last_notify: Instant::now(),
+                unpublished: false,
             }),
             master: Mutex::new(pair.master),
             input_tx,
@@ -511,6 +515,14 @@ impl Session {
         self.notify(&mut inner, true);
     }
 
+    /// Drops all but the last `keep` bytes of scrollback and frees the memory.
+    pub fn trim(&self, keep: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.ring.trim(keep) {
+            self.notify(&mut inner, true);
+        }
+    }
+
     pub fn info(&self) -> SessionInfo {
         let inner = self.inner.lock().unwrap();
         self.snapshot(&inner)
@@ -520,11 +532,12 @@ impl Session {
         self.info_tx.subscribe()
     }
 
-    /// Republishes info if the foreground process changed (it produces no output event).
-    pub fn refresh_foreground(&self) {
+    /// Republishes info if the foreground process changed (it produces no
+    /// output event) or an activity change is still unpublished.
+    pub fn refresh(&self) {
         let mut inner = self.inner.lock().unwrap();
         let fg = self.foreground();
-        if fg != inner.info.foreground {
+        if fg != inner.info.foreground || inner.unpublished {
             inner.info.foreground = fg;
             self.notify(&mut inner, true);
         }
@@ -549,9 +562,11 @@ impl Session {
 
     fn notify(&self, inner: &mut Inner, significant: bool) {
         if !significant && inner.last_notify.elapsed() < ACTIVITY_NOTIFY_INTERVAL {
+            inner.unpublished = true;
             return;
         }
         inner.last_notify = Instant::now();
+        inner.unpublished = false;
         let snap = self.snapshot(inner);
         self.info_tx.send_replace(snap);
     }
