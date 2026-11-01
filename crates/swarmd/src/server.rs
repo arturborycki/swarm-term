@@ -55,7 +55,7 @@ impl Server {
             Ok(Some(ClientMsg::Hello { proto, client_name, client_id })) => {
                 let welcome = ServerMsg::Welcome {
                     proto: PROTOCOL_VERSION,
-                    daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+                    daemon_version: swarm_proto::VERSION.to_string(),
                     hostname: hostname(),
                     os: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
                 };

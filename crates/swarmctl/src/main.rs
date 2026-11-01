@@ -17,7 +17,7 @@ const DETACH_KEY: u8 = 0x1c;
 const REPLAY_INPUT_GUARD: Duration = Duration::from_millis(250);
 
 #[derive(Parser)]
-#[command(name = "swarmctl", version, about = "Manage swarm-term sessions")]
+#[command(name = "swarmctl", version = swarm_client::swarm_proto::VERSION, about = "Manage swarm-term sessions")]
 struct Cli {
     /// Talk to the daemon on this host over ssh instead of the local one.
     #[arg(long, global = true)]

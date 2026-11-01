@@ -93,6 +93,12 @@ Child exits → shim records exit status, keeps the buffer for `exited_retention
 ### Daemon upgrade
 `swarmd` is restarted in place; shims are untouched. Shim upgrade requires session restart (or later: PTY fd handoff via `SCM_RIGHTS` to a new shim — stretch goal).
 
+**Built (2026-10-31).** Every build carries an ID, `swarm_proto::BUILD_ID`: a hash of the swarm crates' sources and `Cargo.lock`, made by `swarm-proto`'s build script with a hash that doesn't depend on the Rust version. A Mac build and a Linux build from the same sources get the same ID. `swarmd --version` and the daemon's `Welcome` report `0.1.0+<id>`. When the app connects to a daemon from another build, it updates it, once per app run per host:
+- **This Mac:** the app stops the daemon and starts its own `swarmd`.
+- **A remote host:** the app first copies its `swarmd`, `swarm-shim` and `swarmctl` over, the same way as a first install. It only does this if the copy there is one Swarm installed (in `~/.local/share/swarm/bin`) and the app's Linux build contains the current version string, so an outdated `scripts/build-linux.sh` output is never pushed.
+
+Sessions keep running and tabs reconnect. Checked: with the app updated, both the local daemon and `orb`'s were updated within about a second at launch, local and remote tabs kept their history, and new commands worked. Sessions started before an update keep their old shim until they're restarted.
+
 ## 4. Session model
 
 ```rust

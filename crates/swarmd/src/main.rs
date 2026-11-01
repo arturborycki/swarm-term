@@ -20,7 +20,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 
 #[derive(Parser)]
-#[command(name = "swarmd", version, about = "swarm-term session daemon")]
+#[command(name = "swarmd", version = swarm_proto::VERSION, about = "swarm-term session daemon")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -157,7 +157,7 @@ fn run(if_not_running: bool) -> Result<()> {
         restore::start(&registry).await;
         let shutdown = Arc::new(Notify::new());
         let server = Arc::new(server::Server { registry, shutdown: shutdown.clone() });
-        tracing::info!(socket = %sock.display(), "swarmd {} listening", env!("CARGO_PKG_VERSION"));
+        tracing::info!(socket = %sock.display(), "swarmd {} listening", swarm_proto::VERSION);
 
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         tokio::select! {
