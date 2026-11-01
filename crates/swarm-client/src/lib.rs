@@ -18,7 +18,7 @@ use swarm_proto::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 pub use swarm_proto;
 
@@ -48,6 +48,8 @@ struct Shared {
     events: broadcast::Sender<SessionEvent>,
     next_id: AtomicU64,
     subscribed: tokio::sync::Mutex<bool>,
+    /// Set by [`Client::close`]: the connection is being dropped.
+    closed: watch::Sender<bool>,
 }
 
 #[derive(Clone)]
@@ -77,7 +79,17 @@ impl Client {
     pub async fn connect_ssh(host: &str, client_name: &str) -> Result<Client> {
         let remote = remote_swarmd_command("bridge");
         let mut child = tokio::process::Command::new("ssh")
-            .args(["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", host, &remote])
+            .args([
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ServerAliveInterval=10",
+                "-o",
+                "ServerAliveCountMax=3",
+                host,
+                &remote,
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -87,9 +99,16 @@ impl Client {
         let wr = child.stdin.take().context("ssh stdin")?;
         let rd = child.stdout.take().context("ssh stdout")?;
         let client = Client::handshake(rd, wr, client_name).await?;
-        // Keep ssh alive as long as the client; it ends when the pipes close.
+        // Keep ssh alive as long as the client; it ends when the pipes close,
+        // or at once on `close` (a dead link can keep ssh waiting a while).
+        let closing = client.clone();
         tokio::spawn(async move {
-            let _ = child.wait().await;
+            tokio::select! {
+                _ = child.wait() => {}
+                _ = closing.closed() => {
+                    let _ = child.kill().await;
+                }
+            }
         });
         Ok(client)
     }
@@ -126,20 +145,32 @@ impl Client {
             events,
             next_id: AtomicU64::new(1),
             subscribed: tokio::sync::Mutex::new(false),
+            closed: watch::channel(false).0,
         });
 
+        let mut closed = shared.closed.subscribe();
         tokio::spawn(async move {
-            while let Some(msg) = out_rx.recv().await {
+            loop {
+                let msg = tokio::select! {
+                    m = out_rx.recv() => m,
+                    _ = closed.wait_for(|c| *c) => None,
+                };
+                let Some(msg) = msg else { break };
                 if write_frame(&mut wr, &msg).await.is_err() {
                     break;
                 }
             }
         });
         let reader_shared = shared.clone();
+        let mut closed = shared.closed.subscribe();
         tokio::spawn(async move {
             let s = reader_shared;
             loop {
-                let msg = match read_frame::<_, ServerMsg>(&mut rd).await {
+                let msg = tokio::select! {
+                    m = read_frame::<_, ServerMsg>(&mut rd) => m,
+                    _ = closed.wait_for(|c| *c) => break,
+                };
+                let msg = match msg {
                     Ok(Some(m)) => m,
                     _ => break,
                 };
@@ -183,6 +214,19 @@ impl Client {
 
     pub fn daemon(&self) -> &DaemonInfo {
         &self.daemon
+    }
+
+    /// Drops the connection now: pending requests fail and every attachment
+    /// gets [`StreamEvent::Closed`], as when the link dies. For a link that is
+    /// dead but not yet noticed (after sleep, or a network change).
+    pub fn close(&self) {
+        self.shared.closed.send_replace(true);
+    }
+
+    /// Resolves once [`Client::close`] was called on this connection.
+    pub async fn closed(&self) {
+        let mut closed = self.shared.closed.subscribe();
+        let _ = closed.wait_for(|c| *c).await;
     }
 
     async fn request_with(

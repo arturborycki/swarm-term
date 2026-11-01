@@ -17,6 +17,14 @@ pub use frame::{read_frame, write_frame, FrameReader, MAX_FRAME_LEN};
 /// Bumped on any incompatible change to the messages below.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Hash of the swarm crates' sources this was built from.
+pub const BUILD_ID: &str = env!("SWARM_BUILD_ID");
+
+/// `<package version>+<build id>`: what `swarmd --version` prints and what the
+/// daemon sends in `Welcome`. Clients compare it with their own to tell when
+/// a running daemon is from another build.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("SWARM_BUILD_ID"));
+
 /// Session ids are ULID strings, stable across daemon restarts.
 pub type SessionId = String;
 
@@ -199,6 +207,8 @@ pub enum ShimRequest {
     Kill { signal: i32 },
     Remove,
     SetMeta(MetaUpdate),
+    /// Keep only the last `keep` bytes of scrollback (memory is short).
+    Trim { keep: u64 },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

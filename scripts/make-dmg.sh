@@ -8,8 +8,17 @@
 #                         app (hardened runtime) and the DMG.
 #   SWARM_NOTARY_PROFILE  a `xcrun notarytool store-credentials` keychain
 #                         profile: notarizes the DMG and staples the ticket.
-# Without them the DMG holds the ad-hoc-signed app, which runs on this Mac but
-# that Gatekeeper rejects elsewhere.
+# Without them the DMG holds the app as bundle-app.sh signed it, which runs on
+# this Mac but that Gatekeeper rejects elsewhere.
+#
+# One-time setup (needs a paid Apple Developer account):
+#   1. Xcode → Settings → Accounts → Manage Certificates → + → "Developer ID
+#      Application". `security find-identity -v -p codesigning` then lists it.
+#   2. Make an app-specific password at account.apple.com, then
+#      xcrun notarytool store-credentials swarm-notary \
+#          --apple-id you@example.com --team-id TEAMID
+#   3. SWARM_SIGN_IDENTITY="Developer ID Application: …" \
+#      SWARM_NOTARY_PROFILE=swarm-notary scripts/make-dmg.sh
 #
 # Usage: scripts/make-dmg.sh [path/to/Swarm.app]   (default: release bundle)
 set -euo pipefail
@@ -20,6 +29,16 @@ VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/
 DIST="$ROOT/dist"
 DMG="$DIST/Swarm-$VERSION.dmg"
 mkdir -p "$DIST"
+
+case "${SWARM_SIGN_IDENTITY:-}" in
+    "" | "Developer ID Application"*) ;;
+    *) echo "SWARM_SIGN_IDENTITY must be a \"Developer ID Application\" identity: Apple notarizes nothing else" >&2
+       exit 1 ;;
+esac
+if [ -n "${SWARM_NOTARY_PROFILE:-}" ] && [ -z "${SWARM_SIGN_IDENTITY:-}" ]; then
+    echo "SWARM_NOTARY_PROFILE needs SWARM_SIGN_IDENTITY: Apple notarizes only signed apps" >&2
+    exit 1
+fi
 
 if [ -n "${SWARM_SIGN_IDENTITY:-}" ]; then
     # Inner binaries first, then the app, with a secure timestamp.

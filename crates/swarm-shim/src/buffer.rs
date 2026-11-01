@@ -9,13 +9,27 @@ pub struct Ring {
     capacity: usize,
     /// Offsets where replay can safely start, ascending.
     boundaries: VecDeque<u64>,
+    /// (offset, ms since the epoch) of the shell hooks that time a command,
+    /// ascending, so a replay can say when they were written.
+    times: VecDeque<(u64, u64)>,
 }
+
+/// How many hook times are kept (a few per command).
+const MAX_TIMES: usize = 4096;
+
+/// Tells the terminal when the output that follows was written (Warp reads
+/// it; other terminals ignore it).
+pub fn output_time_mark(unix_ms: u64) -> Vec<u8> {
+    format!("\x1b]1337;SwarmTime={unix_ms}\x07").into_bytes()
+}
+
 
 impl Ring {
     pub fn new(capacity: usize) -> Self {
         let mut boundaries = VecDeque::new();
         boundaries.push_back(0);
-        Ring { data: VecDeque::with_capacity(capacity.min(1 << 20)), start: 0, capacity, boundaries }
+        let data = VecDeque::with_capacity(capacity.min(1 << 20));
+        Ring { data, start: 0, capacity, boundaries, times: VecDeque::new() }
     }
 
     pub fn start(&self) -> u64 {
@@ -43,7 +57,71 @@ impl Ring {
         while self.boundaries.front().is_some_and(|&b| b < self.start) {
             self.boundaries.pop_front();
         }
+        while self.times.front().is_some_and(|&(o, _)| o < self.start) {
+            self.times.pop_front();
+        }
     }
+
+    /// Drops all but the last `keep` bytes and releases the memory they used
+    /// (the buffer grows again with new output). Whether anything was dropped.
+    pub fn trim(&mut self, keep: usize) -> bool {
+        let drop = self.data.len().saturating_sub(keep);
+        if drop == 0 {
+            return false;
+        }
+        self.data.drain(..drop);
+        self.data.shrink_to(keep);
+        self.start += drop as u64;
+        while self.boundaries.front().is_some_and(|&b| b < self.start) {
+            self.boundaries.pop_front();
+        }
+        while self.times.front().is_some_and(|&(o, _)| o < self.start) {
+            self.times.pop_front();
+        }
+        true
+    }
+
+    pub fn add_time(&mut self, offset: u64, unix_ms: u64) {
+        if offset < self.start || self.times.back().is_some_and(|&(o, _)| o >= offset) {
+            return;
+        }
+        self.times.push_back((offset, unix_ms));
+        if self.times.len() > MAX_TIMES {
+            self.times.pop_front();
+        }
+    }
+
+    /// `pieces` with a time mark before each timed hook in them. A mark is
+    /// put in front of the piece that starts at the hook, and that piece's
+    /// offset moved back by the mark's length, so every piece still ends at
+    /// its real offset (clients resume from where a piece ends).
+    pub fn with_times(&self, pieces: Vec<(u64, Vec<u8>)>) -> Vec<(u64, Vec<u8>)> {
+        let mut out = Vec::with_capacity(pieces.len());
+        for (off, bytes) in pieces {
+            let end = off + bytes.len() as u64;
+            let first = self.times.partition_point(|&(o, _)| o < off);
+            // Cut at each timed hook; each part starts with its hook's mark.
+            let mut cuts: Vec<(u64, Option<u64>)> = vec![(off, None)];
+            for &(o, ms) in self.times.iter().skip(first).take_while(|&&(o, _)| o < end) {
+                match cuts.last_mut() {
+                    Some(last) if last.0 == o => last.1 = Some(ms),
+                    _ => cuts.push((o, Some(ms))),
+                }
+            }
+            for (i, &(from, ms)) in cuts.iter().enumerate() {
+                let to = cuts.get(i + 1).map_or(end, |c| c.0);
+                let mut piece = ms.map(output_time_mark).unwrap_or_default();
+                // Offsets before 0 can't be sent; such a hook goes untimed.
+                if from < piece.len() as u64 {
+                    piece.clear();
+                }
+                piece.extend_from_slice(&bytes[(from - off) as usize..(to - off) as usize]);
+                out.push((to - piece.len() as u64, piece));
+            }
+        }
+        out
+    }
+
 
     pub fn add_boundary(&mut self, offset: u64) {
         if offset < self.start || offset > self.end() {
@@ -188,6 +266,57 @@ mod tests {
         assert_eq!(pieces.last().map(|(o, b)| o + b.len() as u64), Some(r.end()));
         // Short replays come back whole.
         assert_eq!(r.replay_pieces(b, 8, 5), vec![(b, b"PROMPT$ next\n".to_vec())]);
+    }
+
+    #[test]
+    fn time_marks_go_before_timed_hooks_and_keep_piece_ends() {
+        let mut r = Ring::new(1 << 20);
+        let pre = vec![b'a'; 100];
+        r.push(&pre);
+        r.add_time(100, 1000);
+        r.push(b"HOOKbbbb");
+        r.add_time(108, 2000);
+        r.push(b"HOOK");
+        let pieces = r.with_times(vec![(0, r.slice(0, 112).unwrap())]);
+        let m1 = output_time_mark(1000);
+        let m2 = output_time_mark(2000);
+        assert_eq!(pieces[0], (0, pre.clone()));
+        assert_eq!(pieces[1].1, [m1.as_slice(), b"HOOKbbbb"].concat());
+        assert_eq!(pieces[1].0 + pieces[1].1.len() as u64, 108);
+        assert_eq!(pieces[2].1, [m2.as_slice(), b"HOOK"].concat());
+        assert_eq!(pieces[2].0 + pieces[2].1.len() as u64, 112);
+        // A piece starting at a hook gets the mark in front.
+        let pieces = r.with_times(vec![(100, r.slice(100, 104).unwrap())]);
+        assert_eq!(
+            pieces,
+            vec![(
+                104 - (m1.len() as u64 + 4),
+                [m1.as_slice(), b"HOOK"].concat()
+            )]
+        );
+        // Too close to offset 0 for a mark: left untimed.
+        let mut r = Ring::new(64);
+        r.add_time(0, 5);
+        r.push(b"HOOK");
+        assert_eq!(
+            r.with_times(vec![(0, b"HOOK".to_vec())]),
+            vec![(0, b"HOOK".to_vec())]
+        );
+    }
+
+    #[test]
+    fn trim_keeps_the_tail_and_frees_memory() {
+        let mut r = Ring::new(1 << 20);
+        r.push(&vec![b'x'; 600_000]);
+        r.add_boundary(100);
+        r.add_boundary(599_000);
+        assert!(r.trim(2000));
+        assert_eq!((r.start(), r.end()), (598_000, 600_000));
+        assert!(r.data.capacity() < 600_000, "capacity {}", r.data.capacity());
+        assert_eq!(r.replay_start(), 599_000, "boundaries before the new start are gone");
+        assert!(!r.trim(5000), "nothing to drop");
+        r.push(b"more");
+        assert_eq!(r.slice_from(599_998), b"xxmore");
     }
 
     #[test]

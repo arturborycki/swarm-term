@@ -7,18 +7,24 @@
 # Linux builds from scripts/build-linux.sh (target/linux/<platform>/) go to
 # Contents/Resources/swarmd/<platform>/, for installing swarmd on Linux hosts.
 #
-# Usage: scripts/bundle-app.sh            (debug)
-#        scripts/bundle-app.sh --release  (optimized)
+# Usage: scripts/bundle-app.sh              (debug)
+#        scripts/bundle-app.sh --release    (optimized)
+#        scripts/bundle-app.sh --universal  (optimized, arm64 + x86_64; needs
+#                                           `rustup target add x86_64-apple-darwin
+#                                           aarch64-apple-darwin` in both repos)
 # Prints the path of the .app on success.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 PROFILE=debug
 RELEASE_FLAG=""
-if [ "${1:-}" = "--release" ]; then
-    PROFILE=release
-    RELEASE_FLAG="--release"
-fi
+UNIVERSAL=""
+case "${1:-}" in
+    --release) PROFILE=release; RELEASE_FLAG="--release" ;;
+    --universal) PROFILE=release; RELEASE_FLAG="--release"; UNIVERSAL=1 ;;
+    "") ;;
+    *) echo "usage: $0 [--release | --universal]" >&2; exit 2 ;;
+esac
 # shellcheck disable=SC2086 # empty when debug
 cargo build -q $RELEASE_FLAG -p swarmd -p swarm-shim -p swarmctl
 
@@ -31,13 +37,47 @@ rm -rf "$APP"
 for bin in swarmd swarm-shim swarmctl; do
     cp "$ROOT/target/$PROFILE/$bin" "$APP/Contents/MacOS/$bin"
 done
+if [ -n "$UNIVERSAL" ]; then
+    # Build the other CPU's binaries and merge each pair into one file.
+    case "$(uname -m)" in
+        arm64) OTHER=x86_64-apple-darwin ;;
+        *) OTHER=aarch64-apple-darwin ;;
+    esac
+    cargo build -q --release --target "$OTHER" -p swarmd -p swarm-shim -p swarmctl
+    (cd app/app && cargo build -q --release --target "$OTHER" --bin swarm --features gui)
+    for bin in swarmd swarm-shim swarmctl; do
+        lipo -create "$APP/Contents/MacOS/$bin" "$ROOT/target/$OTHER/release/$bin" -output "$APP/Contents/MacOS/$bin.universal"
+        mv "$APP/Contents/MacOS/$bin.universal" "$APP/Contents/MacOS/$bin"
+    done
+    # The bundled `swarm` has its framework rpath added; the other one needs it too.
+    OTHER_SWARM="$ROOT/app/target/$OTHER/release/swarm"
+    (cd app && ./script/macos/add_framework_rpath "$OTHER_SWARM" >/dev/null)
+    lipo -create "$APP/Contents/MacOS/swarm" "$OTHER_SWARM" -output "$APP/Contents/MacOS/swarm.universal"
+    mv "$APP/Contents/MacOS/swarm.universal" "$APP/Contents/MacOS/swarm"
+fi
 if [ -d "$ROOT/target/linux" ]; then
     mkdir -p "$APP/Contents/Resources/swarmd"
     cp -R "$ROOT/target/linux/." "$APP/Contents/Resources/swarmd/"
 else
     echo "note: no Linux builds (scripts/build-linux.sh); Linux hosts can't get swarmd from this app" >&2
 fi
+if [ "$PROFILE" = release ]; then
+    # Local symbols are only for debugging; they're a third of `swarm`'s size.
+    for bin in swarm swarmd swarm-shim swarmctl; do
+        strip -x "$APP/Contents/MacOS/$bin" 2>/dev/null
+    done
+fi
+# A stable identity keeps the permissions macOS grants Swarm (notifications,
+# badges) across rebuilds; an ad-hoc signature looks like a new app each time.
 SIGNING_CERT="$(security find-identity -p codesigning -v | grep "Apple Development" | awk '{print $2}' | head -1 || true)"
-codesign --force --deep --options runtime --sign "${SIGNING_CERT:--}" "$APP" \
-    --entitlements app/script/Debug-Entitlements.plist >/dev/null 2>&1
+sign() {
+    codesign --force --deep --options runtime --sign "$1" "$APP" \
+        --entitlements app/script/Debug-Entitlements.plist >/dev/null 2>&1
+}
+if [ -n "$SIGNING_CERT" ] && sign "$SIGNING_CERT"; then
+    :
+else
+    [ -n "$SIGNING_CERT" ] && echo "note: signing with $SIGNING_CERT failed (keychain locked?); signing ad-hoc" >&2
+    sign -
+fi
 echo "$APP"

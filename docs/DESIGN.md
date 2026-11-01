@@ -93,6 +93,12 @@ Child exits → shim records exit status, keeps the buffer for `exited_retention
 ### Daemon upgrade
 `swarmd` is restarted in place; shims are untouched. Shim upgrade requires session restart (or later: PTY fd handoff via `SCM_RIGHTS` to a new shim — stretch goal).
 
+**Built (2026-10-31).** Every build carries an ID, `swarm_proto::BUILD_ID`: a hash of the swarm crates' sources and `Cargo.lock`, made by `swarm-proto`'s build script with a hash that doesn't depend on the Rust version. A Mac build and a Linux build from the same sources get the same ID. `swarmd --version` and the daemon's `Welcome` report `0.1.0+<id>`. When the app connects to a daemon from another build, it updates it, once per app run per host:
+- **This Mac:** the app stops the daemon and starts its own `swarmd`.
+- **A remote host:** the app first copies its `swarmd`, `swarm-shim` and `swarmctl` over, the same way as a first install. It only does this if the copy there is one Swarm installed (in `~/.local/share/swarm/bin`) and the app's Linux build contains the current version string, so an outdated `scripts/build-linux.sh` output is never pushed.
+
+Sessions keep running and tabs reconnect. Checked: with the app updated, both the local daemon and `orb`'s were updated within about a second at launch, local and remote tabs kept their history, and new commands worked. Sessions started before an update keep their old shim until they're restarted.
+
 ## 4. Session model
 
 ```rust
@@ -146,7 +152,7 @@ Request::Shutdown                                       → Ok   (daemon exits; 
 ← ServerMsg::Lagged { stream, resume_at }              client fell behind; re-attach with ResumeFrom(resume_at)
 ← ServerMsg::StreamClosed { stream, reason }
 ```
-A `Snapshot` message for full-screen apps (§6) is not implemented yet (M4).
+Full-screen apps need no separate `Snapshot` message: on a full attach the shim sends the app's current screen, drawn from its vt100 model, as the last replay frame (§6, M4).
 
 ### swarmd ⇄ shim
 Each request opens its own connection to `$RUNTIME_DIR/shims/<id>.sock`: `Info`, `Watch` (the shim pushes `Changed(SessionInfo)` on every significant change, and activity-only changes at most once a second), `Attach` (then `ShimInput` one way and output messages the other), `Kill`, `Remove`, `SetMeta`. The shim owns all session metadata, including name and UI hints, so `swarmd` keeps no state of its own: on start it scans `shims/` and re-adopts every shim that answers, deleting stale sockets. `swarmd` relays attachment frames between the client connection and the shim connection without interpreting the bytes.
@@ -160,7 +166,7 @@ Warp's blocks, prompt detection and input editor depend on **escape sequences em
 Each shim keeps:
 1. **Raw ring buffer** of PTY output (default 16 MB, configurable per session) addressed by a global `u64` byte offset.
 2. **Boundary index**: offsets of safe replay start points, found by a lightweight `vte` scan (no full emulation). Built so far: offset 0, OSC 133;A prompt-start markers (pointing at the ESC that begins them) and the byte after every alt-screen exit. Warp's own block markers are added in M2. The same scan tracks the title (OSC 0/2), cwd (OSC 7) and alt-screen state.
-3. **Server-side terminal model** (planned, M4) (upstream `alacritty_terminal`, the same code Warp's grid model was derived from; we use upstream rather than Warp's AGPL-licensed copy, see §14) used for two things only: knowing whether we're in alt-screen, and producing a screen snapshot for full-screen apps.
+3. **Server-side terminal model** (built in M4 with the `vt100` crate, MIT; the plan was upstream `alacritty_terminal`, and either way not Warp's AGPL-licensed copy, see §14). It is used for two things only: knowing whether we're in alt-screen, and producing a screen snapshot for full-screen apps.
 
 Reattach algorithm (`Attach { mode: Full }`):
 - **Normal (primary screen) case:** pick the oldest boundary still inside the ring buffer → send `Output` from there. Warp's parser replays the bytes and reconstructs the blocks exactly as if it had been attached the whole time. Older history beyond the ring is lost (shown as "earlier output truncated").
@@ -246,7 +252,7 @@ Instead of a separate `daemon_tty` manager, the daemon plugs in one level lower,
 
 Verified in the bundled app: launch → run a command → quit → the session keeps running with `auto_attach=true` → relaunch → the same session comes back as the tab with its earlier blocks rebuilt, no second session, no repeated shell setup, and new commands render as new blocks.
 
-**Known gaps:** after a reattach the prompt's folder shows `/Users/<me>` instead of `~` (the session's home-dir info isn't fully restored), a stray `%` appears in the first replayed block, and replayed block durations are wrong. Tab order isn't recorded yet (`tab_order`), only creation order. The Swarm UI (picker, host groups, first-run sheet, branding) isn't built.
+**Gaps found here, since fixed:** the prompt's folder after a reattach (now `~`), a stray `%` in the first replayed block (the bridge drops zsh's partial-line marks from replay), tab order (recorded in `tab_order`), and the Swarm UI (built, see below). Replayed blocks used to get the reattach time as their start and end, so they showed no duration. The shim now records when each `Precmd`, `Preexec` and `CommandFinished` hook was written and puts `OSC 1337 ; SwarmTime=<ms>` in front of it in a replay. Warp uses that time for the block's start and end, and the bridge resets it to "now" when replay ends. Checked: a `sleep 7` reattached 85 s later still shows 7.04 s and its real start and end times, and a command run after the reattach gets the current time. Other terminals ignore the sequence. Blocks replayed by a shim started before this change still show no duration, because that shim recorded no times.
 
 ### Swarm identity and UI build plan (2026-10-30)
 
@@ -544,7 +550,7 @@ A popover from "N detached", from the host group's menu, or with **Cmd+O**. It's
 | **File** | New Session (Cmd+T), New Session on Host ▸, Open Session… (Cmd+O), Connect to Host… (Cmd+Shift+K), Detach Tab (Cmd+W), Terminate Session… (Cmd+Shift+W), Close Window |
 | **Session** | Rename… , Tab Color ▸, Restart (when exited), Attach Read-Only, Copy Attach Command, Show Session Info (Cmd+I) |
 
-Shortcuts as built (2026-10-31): ⌘O opens the session picker (Warp's Files palette moves to ⌥⌘O). Connect to Host… is ⌃⌘H, because ⇧⌘K clears lines in the input editor and ⌃⌘K opens the keyboard shortcuts. Sessions sidebar is ⌃⌘S (⌘B too).
+Shortcuts as built (2026-10-31): ⌘O opens the session picker (Warp's Files palette moves to ⌥⌘O; its navigation palette, which also finds detached sessions, stays on ⇧⌘P). Connect to Host… is ⌃⌘H, because ⇧⌘K clears lines in the input editor and ⌃⌘K opens the keyboard shortcuts. Sessions sidebar is ⌃⌘S (⌘B too).
 | **View** | Sessions as Sidebar (Ctrl+Cmd+S), Show Status Bar, Collapse Host Groups, Warp's existing view items |
 | **Window** | Standard items, plus a list of tabs grouped by host; Move Tab to New Window |
 
@@ -578,6 +584,18 @@ One sheet (§3a): daemon start mode, optional "Connect to a server", and a singl
 - Full keyboard navigation of the picker, connect sheet and settings.
 - Respect Reduce Motion (no spinners or animations; static `◐` instead), Increase Contrast, and system accent color.
 
+### Visual work against the mockups (2026-10-31)
+
+- **State marks** (States mockup): each daemon session's sidebar row icon and tab indicator is a shape and a color: ● idle, ◐ running a command, ! needs attention (ended with an error, or its connection was lost for good), ○ exited, ⟳ reconnecting; a small blue dot marks another client attached. On tabs an idle mark yields to Warp's own indicators.
+- **Host groups:** remote sessions without a group of their own open in a group per host, in the host's color; their rows show the shell's title.
+- **Status bar:** under the active session, "This Mac · zsh · ~ · 120×39" and "Only this window" or "Also attached: swarmctl". The app attaches as "Swarm on <this Mac>".
+- **Reconnecting banner:** "Connection to orb lost. Reconnecting — output will resume where it stopped." with Retry Now. Checked against the VM: Retry Now reconnected within a second instead of at the next backoff step.
+- **Sidebar header and footer:** "SESSIONS · N OPEN" over the filter field ("Filter sessions"), and "N detached" / Connect… at the bottom; their menus open upward from there.
+- **Session picker:** ⌘O (File → Open Session…), "N detached" in the title bar or the sidebar footer open a popover under the title bar's right end: a switch per host (This Mac and each followed host, with counts), a filter by name, folder or command, and rows with the state mark, name ("also open" when another client is attached), folder, what's running and last activity. It lists running sessions that no window of this app has open. Rows are checked to open or terminate several (Terminate confirms); ↑↓ move, Space (empty filter) or ⇧↩ select, ↩ opens the checked rows or the highlighted one, ⌘↩ opens every match, Esc closes, double-click opens one. Right-clicking a row offers Rename… (in place; ↩ saves, Esc cancels), Copy Attach Command (`swarmctl attach [--host h] <id>`) and Terminate…. A session the app terminates isn't reported as needing attention. ⌘⌫ terminates the checked rows (or the highlighted one) when the filter is empty; with text in it, it clears the text. Exited sessions aren't listed; Settings → Sessions removes them. Warp's navigation palette is "Find Tab or Session…" (⇧⌘P) and its file search ⌥⌘O.
+- **Connect sheet:** Connect… (title bar, sidebar footer), ⌃⌘H, the first-run sheet and "Connect to user@host" in the palette open a sheet: hosts from `~/.ssh/config` and remembered hosts (with `user@hostname` from `ssh -G`, which only reads the config; nothing connects until a host is picked) and a field for any `user@host`. The checklist runs ssh access → swarmd (Install swarmd when missing, for platforms the app carries) → lingering (systemd hosts) → sessions found. Failures show ssh's message and a fix for the common cases (`ssh-add`, accepting a host key, unknown name, refused or silent port) with Copy and Retry. Connected, the daemon's start mode can be switched, and Choose Sessions opens the picker on that host. Checked against the VM: connect, install after making swarmd unrunnable, choose and open a session; failures with an unknown host and a host key that isn't trusted. It replaces the hosts menu and its alerts.
+- **New output:** a background tab whose session prints something gets a bold title, in the tab bar and the sidebar, until it's shown. Output in the first second after a tab is shown, hidden or resized (the shell redrawing) and in the first 5 seconds after attaching (Warp's shell setup) doesn't count.
+- **Exited sessions:** a session that ends with an error (a non-zero exit code or a signal) keeps its tab, with "Session ended (exit 3)" under its last output and Restart / Close. Restart starts a new session in its place (same folder, name and group; same command unless it's a shell this app started, which gets the default shell) in a new tab, removes the ended one and closes its tab. A clean exit (`exit`, code 0) and sessions the app terminated close their tab as before. Note that `exit` right after a failed command exits with that command's code, so it keeps the tab too.
+
 ### Performance budgets (measured on an M1 MacBook Air)
 | Action | Target |
 |---|---|
@@ -600,10 +618,12 @@ To meet the reattach budget, the client **renders the tail first**: the shim sen
 How the reattach budget is met: not by tail-first rendering (Warp's block list can't take prepended blocks), but by not replaying what Warp would throw away. Warp keeps at most `terminal.maximum_grid_size` rows per block (50,000 by default). The shim sends a long block's first 64 KB (prompt and command hooks) and its last 50,000 lines, skipping the middle at a line start, with pieces at their real offsets. Before this, a 3-million-line block took ~1 s to parse after the window appeared. The benchmarks are ignored tests in `crates/swarmd/tests/e2e.rs` (`bench_*`, run with `--ignored --nocapture`).
 
 ### Distribution
-- Universal app (arm64 + x86_64), **macOS 13 Ventura or later** (needed for `SMAppService`).
+- Universal app (arm64 + x86_64), **macOS 13 Ventura or later** (needed for `SMAppService`). As built: `scripts/bundle-app.sh --universal` builds both CPUs and merges each binary with `lipo`; release bundles strip local symbols, which saves about a third of `swarm`'s size. `LSMinimumSystemVersion` is 13.0. Checked: every binary in the bundle holds both architectures and the signature verifies. The x86_64 half hasn't been run, because this Mac has no Rosetta.
+- As built: `scripts/bundle-app.sh` signs with an "Apple Development" identity when the keychain has one (a stable identity keeps macOS permissions across rebuilds), else ad-hoc. `scripts/make-dmg.sh` signs and notarizes only with a "Developer ID Application" identity and a notarytool profile; its header lists the one-time setup.
 - Hardened runtime, Developer ID signed and notarized; DMG and Homebrew cask.
 - `swarmd`, `swarm-shim` and `swarmctl` ship inside the bundle (`Contents/MacOS/`). A Settings button installs a `swarmctl` symlink into `/usr/local/bin` or `~/.local/bin`.
 - Updates with Sparkle 2 (EdDSA-signed feed on GitHub Releases). Updating the app never restarts running shims; `swarmd` is restarted and re-adopts them (§3).
+- As built: **Swarm → Check for Updates…** reads the latest GitHub release of `arturborycki/swarm-term` (`SWARM_UPDATE_FEED` overrides the URL). If its `v<version>` tag is newer than the app, it offers that release's `Swarm-<version>.dmg`, or the release page if there's no DMG. It ignores drafts and pre-releases. It never installs anything itself, so it needs no signing key; Sparkle's automatic install can replace it once there's an EdDSA key and a hosted appcast. While the repo is private, GitHub answers 404 and the check says the app is up to date. Checked against a local feed: newer (dialog with Download and Not Now), same version (up to date), 404 (up to date) and unreachable (an error naming the URL).
 
 ### Design process
 1. Clickable mockups of the main window, picker, connect sheet, first run and settings **before M2 coding**, reviewed against the principles above.
@@ -668,9 +688,10 @@ M0–M1 are independent of Warp and de-risk the hard part; M2 is where most of t
     - Light and dark mode: checked. Swarm's title bar, host colors, sidebar dots and Settings pages follow the theme.
     - Keyboard-only: the main flows have shortcuts (⌘T, ⌘O, ⌃⌘H, ⌃⌘S/⌘B, ⌘, and ⌘W), and the menus cover the rest.
     - Reduce Motion: Swarm adds no animations.
-    - VoiceOver: not done. Warp's custom renderer exposes only a minimal accessibility tree, and Swarm's views inherit that.
+    - VoiceOver: Warp announces the focused view, actions and events (`warpui_core::accessibility`). Swarm adds: tab switches read the tab's name, position, host and state ("build, tab 2 of 5, This Mac, running cargo"); sessions that end with an error, lose their connection or reconnect are announced. Checked without turning VoiceOver on, by recording the app's announcements (`AXAnnouncementRequested`) with an accessibility observer. A session exiting with code 3 gave "Session ended: … on this Mac exited with code 3." Dropping the ssh link to `orb` first gave one announcement per tab; it now waits 0.6 s and says it once per host: "4 sessions on orb lost their connection; reconnecting", then "4 sessions on orb reconnected" about 5 s later. Tab-switch announcements only run when VoiceOver is on (Warp checks `isVoiceOverEnabled`), so they haven't been heard yet.
   - **Start mode:** uses a launchd agent written by `swarmd service install`, not `SMAppService`. `SMAppService` needs a signed app with an embedded login-item helper; revisit when signing is set up.
-- **M3:** a dropped connection resumes from the last offset (`ResumeFrom`) with no replay or visual reset. This was checked by killing the ssh connection and making the remote daemon unreachable. A real laptop sleep/wake hasn't been tested yet.
+- **M3:** a dropped connection resumes from the last offset (`ResumeFrom`) with no replay or visual reset. This was checked by killing the ssh connection and making the remote daemon unreachable.
+  - **Sleep/wake:** a link that died during sleep looks open until ssh notices (`ServerAliveInterval=10`, 3 misses). On wake and when the network comes back, the app pings each remote daemon; one that doesn't answer within 4 s is dropped (`Client::close`), so its tabs reconnect at once, and tabs already retrying skip the rest of their backoff. Checked by freezing the VM's `swarmd bridge` (SIGSTOP): ssh stayed up, the ping failed in 4 s, and a new connection took 70 ms. A real laptop sleep/wake hasn't been tested.
 - **M4:**
   - **Alt-screen snapshots:** on a full attach, the shim's vt100 model redraws the app's screen.
   - **Tab drag-out:** local tabs can be dragged into their own window; remote tabs only reorder.
@@ -678,7 +699,15 @@ M0–M1 are independent of Warp and de-risk the hard part; M2 is where most of t
   - **Notifications and Dock badge:** a session that exits with an error, or a connection that gives up, sends a notification and counts on the badge. The badge shows once notifications (badges) are allowed for Swarm in System Settings.
   - **Restore after reboot:** opt-in, from Settings → Daemon or `swarmd restore on`.
   - **DMG and Homebrew cask:** `scripts/make-dmg.sh` and `packaging/homebrew/swarm.rb`.
-  - **Still needed, and it needs you:** signing and notarization (a Developer ID certificate and a notarytool profile), publishing releases, and an update feed. Sparkle needs an EdDSA key and a hosted appcast; Homebrew `brew upgrade` works once releases are public.
+  - **Update check:** Swarm → Check for Updates… compares the app with the latest GitHub release (see Distribution).
+  - **Universal app:** `scripts/bundle-app.sh --universal`.
+  - **Still needed, and it needs you:**
+    - Signing and notarization: this Mac has only an "Apple Development" certificate; a "Developer ID Application" certificate and a notarytool profile are needed.
+    - Publishing releases: the repo is private, so the update check finds nothing yet.
+    - Sparkle's automatic install: it needs an EdDSA key, which should be yours, and a hosted appcast.
+    - Hearing the tab-switch announcements with VoiceOver on.
+    - A real laptop sleep/wake test against a remote host.
+    - Running the x86_64 build on an Intel Mac or with Rosetta.
 
 **Earlier status (2026-10-30):** M0, M1 and D are done on branch `feat/daemon-core`. M0–M1 are covered by end-to-end tests against real daemons, shims and shells (`crates/swarmd/tests/e2e.rs`) and by `scripts/interactive-check.exp` (vim and htop in a real pty, across a daemon restart). Verified on macOS (arm64) and Linux (Ubuntu, arm64, via OrbStack), including the `ssh host swarmd bridge` path. Next: M2, starting with an unchanged build of the Warp fork and the shell-integration spike (§13, risk 2).
 
@@ -687,7 +716,7 @@ M0–M1 are independent of Warp and de-risk the hard part; M2 is where most of t
 1. **Codebase size and upstream churn.** Warp is about 1.8M lines and moves fast, so rebasing the fork will be ongoing work. Keep the diff concentrated in `daemon_tty`, the runtime selection in `pane_group`, the replay guard and feature flags. Rebase on a fixed schedule rather than tracking `main` continuously.
 2. **Warp's shell-integration assumptions beyond bootstrap.** Some per-session state (history, completions, session id) is fetched or set through the PTY when a shell starts (§8a). Each piece must either be stored in the shim or re-derivable after reattach. This is the first task of M2.
 3. **Replay must never write to the PTY.** This covers terminal queries (DA, cursor position reports) and Warp's `InitShell` hook alike. For replayed bytes the client must neither answer queries nor run hooks; it does so only for live bytes. Replay frames are marked, and `daemon_tty` gates everything the model would send back to the PTY.
-4. Ring buffer memory with many sessions: cap global memory, evict from idle sessions first.
+4. Ring buffer memory with many sessions: cap global memory, evict from idle sessions first. **Built (2026-10-31):** `swarmd` checks every 10 s whether all sessions' scrollback together is over the cap, 512 MB by default (`SWARM_SCROLLBACK_TOTAL`, in bytes). If it is, the idlest sessions keep only their last 1 MB until the total is under 90% of the cap: exited sessions first, then detached ones, then the least recently active. The shim frees that memory, and a later replay starts within what's left. Tested end to end with a 6 MB cap: of two 4 MB sessions, the older one was trimmed to 1 MB and still replays; the newer one kept its scrollback. That test also found that a session's last activity could stay unpublished (updates are sent at most once a second), which left sizes and "last active" times stale. A one-second tick now sends it.
 
 ## 14. Open questions (need decisions)
 

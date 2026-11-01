@@ -1,5 +1,6 @@
 //! `swarmd`: the per-user session daemon.
 
+mod memory;
 mod registry;
 mod restore;
 mod server;
@@ -20,7 +21,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 
 #[derive(Parser)]
-#[command(name = "swarmd", version, about = "swarm-term session daemon")]
+#[command(name = "swarmd", version = swarm_proto::VERSION, about = "swarm-term session daemon")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -155,9 +156,10 @@ fn run(if_not_running: bool) -> Result<()> {
         let registry = registry::Registry::new(runtime.clone(), shim);
         registry.adopt_existing().await?;
         restore::start(&registry).await;
+        tokio::spawn(memory::run(registry.clone()));
         let shutdown = Arc::new(Notify::new());
         let server = Arc::new(server::Server { registry, shutdown: shutdown.clone() });
-        tracing::info!(socket = %sock.display(), "swarmd {} listening", env!("CARGO_PKG_VERSION"));
+        tracing::info!(socket = %sock.display(), "swarmd {} listening", swarm_proto::VERSION);
 
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         tokio::select! {

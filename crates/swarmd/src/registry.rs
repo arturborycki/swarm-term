@@ -180,6 +180,10 @@ impl Registry {
         }
     }
 
+    pub async fn trim(&self, id: &str, keep: u64) -> Result<()> {
+        self.simple(id, ShimRequest::Trim { keep }).await
+    }
+
     pub async fn set_meta(&self, id: &str, update: MetaUpdate) -> Result<SessionInfo> {
         self.simple(id, ShimRequest::SetMeta(update)).await?;
         self.info(id).await
