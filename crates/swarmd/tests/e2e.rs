@@ -480,6 +480,8 @@ async fn replay_keeps_warp_session_hooks_and_starts_at_precmd() {
     assert!(starts(&chunks[1], &boot), "second replayed chunk must be the kept Bootstrapped hook");
     assert!(total < 64 * 1024, "replay should start at the Precmd boundary, got {total} bytes");
     let rest: Vec<u8> = chunks[2..].concat();
+    let rest = rest.strip_prefix(b"\x1b]1337;SwarmTime=").expect("the Precmd hook comes with its time");
+    let rest = &rest[rest.iter().position(|&b| b == 0x07).unwrap() + 1..];
     assert!(rest.starts_with(format!("\x1bP$d{precmd}").as_bytes()), "replay must start at the Precmd hook");
 }
 
@@ -534,7 +536,9 @@ async fn replay_reopens_a_command_whose_start_was_trimmed() {
     let head = |c: &[u8]| String::from_utf8_lossy(&c[..c.len().min(200)]).into_owned();
     assert!(chunks[0].starts_with(&hook(&init)), "first comes the kept InitShell hook; got {:?} ({} chunks, {total} bytes, from {})", head(&chunks[0]), chunks.len(), b.replay_from);
     let header = [hook(&precmd), hook(&preexec)].concat();
-    assert!(chunks[1].starts_with(&header), "then the trimmed command's Precmd and Preexec; got {:?}", String::from_utf8_lossy(&chunks[1][..chunks[1].len().min(300)]));
+    let reopened = chunks[1].strip_prefix(b"\x1b]1337;SwarmTime=").expect("the reopened block keeps its start time");
+    let reopened = &reopened[reopened.iter().position(|&b| b == 0x07).unwrap() + 1..];
+    assert!(reopened.starts_with(&header), "then the trimmed command's Precmd and Preexec; got {:?}", String::from_utf8_lossy(&chunks[1][..chunks[1].len().min(300)]));
     let rest: Vec<u8> = chunks[2..].concat();
     assert!(rest.starts_with(b"line\r\n"), "the kept output starts on a whole line");
     // The block keeps its head and its last 50,000 lines (what a terminal

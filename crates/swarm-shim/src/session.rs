@@ -37,11 +37,17 @@ pub struct Session {
 /// a replay can still start with them after the ring has dropped them.
 const STICKY_HOOKS: [&str; 2] = ["InitShell", "Bootstrapped"];
 
+/// Warp hooks whose time is the start or end of a command; a replay marks
+/// them with it so the client's blocks keep their real times.
+const TIMED_HOOKS: [&str; 3] = ["Precmd", "Preexec", "CommandFinished"];
+
 /// The hooks that open a Warp block (`Precmd`, then `Preexec` with the
 /// command), so a replay that starts inside that block's output can reopen it.
 struct BlockHeader {
     precmd_at: u64,
     preexec_at: u64,
+    /// When the command started (ms since the epoch).
+    preexec_ms: u64,
     bytes: Vec<u8>,
 }
 
@@ -241,6 +247,9 @@ impl Session {
             inner.ring.add_boundary(b);
         }
         for hook in ev.hooks {
+            if TIMED_HOOKS.contains(&hook.name.as_str()) {
+                inner.ring.add_time(hook.start, now_ms());
+            }
             if hook.name == "Precmd" {
                 // Warp starts a new block here.
                 inner.ring.add_boundary(hook.start);
@@ -254,7 +263,8 @@ impl Session {
                         inner.pending_precmd = Some((hook.start, bytes));
                     } else if let Some((precmd_at, mut header)) = inner.pending_precmd.take() {
                         header.extend_from_slice(&bytes);
-                        inner.headers.push_back(BlockHeader { precmd_at, preexec_at: hook.start, bytes: header });
+                        let preexec_ms = now_ms();
+                        inner.headers.push_back(BlockHeader { precmd_at, preexec_at: hook.start, preexec_ms, bytes: header });
                         if inner.headers.len() > BLOCK_HEADERS {
                             inner.headers.pop_front();
                         }
@@ -345,11 +355,14 @@ impl Session {
             if let Some(i) = cut.filter(|_| still_running_at_start) {
                 let header = &inner.headers[i];
                 replay_from = inner.ring.next_line_start(start, replay_from);
-                reopened_block = Some((header.preexec_at, header.bytes.clone()));
+                let mut bytes = crate::buffer::output_time_mark(header.preexec_ms);
+                bytes.extend_from_slice(&header.bytes);
+                reopened_block = Some((header.preexec_at, bytes));
             }
         }
         let live_from = inner.ring.end();
         let replay = inner.ring.replay_pieces(replay_from, REPLAY_BLOCK_HEAD, REPLAY_BLOCK_LINES);
+        let replay = inner.ring.with_times(replay);
         let prelude = if full {
             let mut prelude: Vec<(u64, Vec<u8>)> =
                 inner.sticky.iter().filter(|(_, off, _)| *off < replay_from).map(|(_, off, b)| (*off, b.clone())).collect();

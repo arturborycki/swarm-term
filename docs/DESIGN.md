@@ -146,7 +146,7 @@ Request::Shutdown                                       → Ok   (daemon exits; 
 ← ServerMsg::Lagged { stream, resume_at }              client fell behind; re-attach with ResumeFrom(resume_at)
 ← ServerMsg::StreamClosed { stream, reason }
 ```
-A `Snapshot` message for full-screen apps (§6) is not implemented yet (M4).
+Full-screen apps need no separate `Snapshot` message: on a full attach the shim sends the app's current screen, drawn from its vt100 model, as the last replay frame (§6, M4).
 
 ### swarmd ⇄ shim
 Each request opens its own connection to `$RUNTIME_DIR/shims/<id>.sock`: `Info`, `Watch` (the shim pushes `Changed(SessionInfo)` on every significant change, and activity-only changes at most once a second), `Attach` (then `ShimInput` one way and output messages the other), `Kill`, `Remove`, `SetMeta`. The shim owns all session metadata, including name and UI hints, so `swarmd` keeps no state of its own: on start it scans `shims/` and re-adopts every shim that answers, deleting stale sockets. `swarmd` relays attachment frames between the client connection and the shim connection without interpreting the bytes.
@@ -160,7 +160,7 @@ Warp's blocks, prompt detection and input editor depend on **escape sequences em
 Each shim keeps:
 1. **Raw ring buffer** of PTY output (default 16 MB, configurable per session) addressed by a global `u64` byte offset.
 2. **Boundary index**: offsets of safe replay start points, found by a lightweight `vte` scan (no full emulation). Built so far: offset 0, OSC 133;A prompt-start markers (pointing at the ESC that begins them) and the byte after every alt-screen exit. Warp's own block markers are added in M2. The same scan tracks the title (OSC 0/2), cwd (OSC 7) and alt-screen state.
-3. **Server-side terminal model** (planned, M4) (upstream `alacritty_terminal`, the same code Warp's grid model was derived from; we use upstream rather than Warp's AGPL-licensed copy, see §14) used for two things only: knowing whether we're in alt-screen, and producing a screen snapshot for full-screen apps.
+3. **Server-side terminal model** (built in M4 with the `vt100` crate, MIT; the plan was upstream `alacritty_terminal`, and either way not Warp's AGPL-licensed copy, see §14). It is used for two things only: knowing whether we're in alt-screen, and producing a screen snapshot for full-screen apps.
 
 Reattach algorithm (`Attach { mode: Full }`):
 - **Normal (primary screen) case:** pick the oldest boundary still inside the ring buffer → send `Output` from there. Warp's parser replays the bytes and reconstructs the blocks exactly as if it had been attached the whole time. Older history beyond the ring is lost (shown as "earlier output truncated").
@@ -246,7 +246,7 @@ Instead of a separate `daemon_tty` manager, the daemon plugs in one level lower,
 
 Verified in the bundled app: launch → run a command → quit → the session keeps running with `auto_attach=true` → relaunch → the same session comes back as the tab with its earlier blocks rebuilt, no second session, no repeated shell setup, and new commands render as new blocks.
 
-**Known gaps:** after a reattach the prompt's folder shows `/Users/<me>` instead of `~` (the session's home-dir info isn't fully restored), a stray `%` appears in the first replayed block, and replayed block durations are wrong. Tab order isn't recorded yet (`tab_order`), only creation order. The Swarm UI (picker, host groups, first-run sheet, branding) isn't built.
+**Gaps found here, since fixed:** the prompt's folder after a reattach (now `~`), a stray `%` in the first replayed block (the bridge drops zsh's partial-line marks from replay), tab order (recorded in `tab_order`), and the Swarm UI (built, see below). Replayed blocks used to get the reattach time as their start and end, so they showed no duration. The shim now records when each `Precmd`, `Preexec` and `CommandFinished` hook was written and puts `OSC 1337 ; SwarmTime=<ms>` in front of it in a replay. Warp uses that time for the block's start and end, and the bridge resets it to "now" when replay ends. Checked: a `sleep 7` reattached 85 s later still shows 7.04 s and its real start and end times, and a command run after the reattach gets the current time. Other terminals ignore the sequence. Blocks replayed by a shim started before this change still show no duration, because that shim recorded no times.
 
 ### Swarm identity and UI build plan (2026-10-30)
 
