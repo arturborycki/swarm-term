@@ -618,11 +618,12 @@ To meet the reattach budget, the client **renders the tail first**: the shim sen
 How the reattach budget is met: not by tail-first rendering (Warp's block list can't take prepended blocks), but by not replaying what Warp would throw away. Warp keeps at most `terminal.maximum_grid_size` rows per block (50,000 by default). The shim sends a long block's first 64 KB (prompt and command hooks) and its last 50,000 lines, skipping the middle at a line start, with pieces at their real offsets. Before this, a 3-million-line block took ~1 s to parse after the window appeared. The benchmarks are ignored tests in `crates/swarmd/tests/e2e.rs` (`bench_*`, run with `--ignored --nocapture`).
 
 ### Distribution
-- Universal app (arm64 + x86_64), **macOS 13 Ventura or later** (needed for `SMAppService`).
+- Universal app (arm64 + x86_64), **macOS 13 Ventura or later** (needed for `SMAppService`). As built: `scripts/bundle-app.sh --universal` builds both CPUs and merges each binary with `lipo`; release bundles strip local symbols, which saves about a third of `swarm`'s size. `LSMinimumSystemVersion` is 13.0. Checked: every binary in the bundle holds both architectures and the signature verifies. The x86_64 half hasn't been run, because this Mac has no Rosetta.
 - As built: `scripts/bundle-app.sh` signs with an "Apple Development" identity when the keychain has one (a stable identity keeps macOS permissions across rebuilds), else ad-hoc. `scripts/make-dmg.sh` signs and notarizes only with a "Developer ID Application" identity and a notarytool profile; its header lists the one-time setup.
 - Hardened runtime, Developer ID signed and notarized; DMG and Homebrew cask.
 - `swarmd`, `swarm-shim` and `swarmctl` ship inside the bundle (`Contents/MacOS/`). A Settings button installs a `swarmctl` symlink into `/usr/local/bin` or `~/.local/bin`.
 - Updates with Sparkle 2 (EdDSA-signed feed on GitHub Releases). Updating the app never restarts running shims; `swarmd` is restarted and re-adopts them (§3).
+- As built: **Swarm → Check for Updates…** reads the latest GitHub release of `arturborycki/swarm-term` (`SWARM_UPDATE_FEED` overrides the URL). If its `v<version>` tag is newer than the app, it offers that release's `Swarm-<version>.dmg`, or the release page if there's no DMG. It ignores drafts and pre-releases. It never installs anything itself, so it needs no signing key; Sparkle's automatic install can replace it once there's an EdDSA key and a hosted appcast. While the repo is private, GitHub answers 404 and the check says the app is up to date. Checked against a local feed: newer (dialog with Download and Not Now), same version (up to date), 404 (up to date) and unreachable (an error naming the URL).
 
 ### Design process
 1. Clickable mockups of the main window, picker, connect sheet, first run and settings **before M2 coding**, reviewed against the principles above.
@@ -687,7 +688,7 @@ M0–M1 are independent of Warp and de-risk the hard part; M2 is where most of t
     - Light and dark mode: checked. Swarm's title bar, host colors, sidebar dots and Settings pages follow the theme.
     - Keyboard-only: the main flows have shortcuts (⌘T, ⌘O, ⌃⌘H, ⌃⌘S/⌘B, ⌘, and ⌘W), and the menus cover the rest.
     - Reduce Motion: Swarm adds no animations.
-    - VoiceOver: Warp announces the focused view, actions and events (`warpui_core::accessibility`). Swarm adds: tab switches read the tab's name, position, host and state ("build, tab 2 of 5, This Mac, running cargo"); sessions that end with an error, lose their connection or reconnect are announced. Not yet checked with VoiceOver running.
+    - VoiceOver: Warp announces the focused view, actions and events (`warpui_core::accessibility`). Swarm adds: tab switches read the tab's name, position, host and state ("build, tab 2 of 5, This Mac, running cargo"); sessions that end with an error, lose their connection or reconnect are announced. Checked without turning VoiceOver on, by recording the app's announcements (`AXAnnouncementRequested`) with an accessibility observer. A session exiting with code 3 gave "Session ended: … on this Mac exited with code 3." Dropping the ssh link to `orb` first gave one announcement per tab; it now waits 0.6 s and says it once per host: "4 sessions on orb lost their connection; reconnecting", then "4 sessions on orb reconnected" about 5 s later. Tab-switch announcements only run when VoiceOver is on (Warp checks `isVoiceOverEnabled`), so they haven't been heard yet.
   - **Start mode:** uses a launchd agent written by `swarmd service install`, not `SMAppService`. `SMAppService` needs a signed app with an embedded login-item helper; revisit when signing is set up.
 - **M3:** a dropped connection resumes from the last offset (`ResumeFrom`) with no replay or visual reset. This was checked by killing the ssh connection and making the remote daemon unreachable.
   - **Sleep/wake:** a link that died during sleep looks open until ssh notices (`ServerAliveInterval=10`, 3 misses). On wake and when the network comes back, the app pings each remote daemon; one that doesn't answer within 4 s is dropped (`Client::close`), so its tabs reconnect at once, and tabs already retrying skip the rest of their backoff. Checked by freezing the VM's `swarmd bridge` (SIGSTOP): ssh stayed up, the ping failed in 4 s, and a new connection took 70 ms. A real laptop sleep/wake hasn't been tested.
@@ -698,7 +699,15 @@ M0–M1 are independent of Warp and de-risk the hard part; M2 is where most of t
   - **Notifications and Dock badge:** a session that exits with an error, or a connection that gives up, sends a notification and counts on the badge. The badge shows once notifications (badges) are allowed for Swarm in System Settings.
   - **Restore after reboot:** opt-in, from Settings → Daemon or `swarmd restore on`.
   - **DMG and Homebrew cask:** `scripts/make-dmg.sh` and `packaging/homebrew/swarm.rb`.
-  - **Still needed, and it needs you:** signing and notarization (a Developer ID certificate and a notarytool profile), publishing releases, and an update feed. Sparkle needs an EdDSA key and a hosted appcast; Homebrew `brew upgrade` works once releases are public.
+  - **Update check:** Swarm → Check for Updates… compares the app with the latest GitHub release (see Distribution).
+  - **Universal app:** `scripts/bundle-app.sh --universal`.
+  - **Still needed, and it needs you:**
+    - Signing and notarization: this Mac has only an "Apple Development" certificate; a "Developer ID Application" certificate and a notarytool profile are needed.
+    - Publishing releases: the repo is private, so the update check finds nothing yet.
+    - Sparkle's automatic install: it needs an EdDSA key, which should be yours, and a hosted appcast.
+    - Hearing the tab-switch announcements with VoiceOver on.
+    - A real laptop sleep/wake test against a remote host.
+    - Running the x86_64 build on an Intel Mac or with Rosetta.
 
 **Earlier status (2026-10-30):** M0, M1 and D are done on branch `feat/daemon-core`. M0–M1 are covered by end-to-end tests against real daemons, shims and shells (`crates/swarmd/tests/e2e.rs`) and by `scripts/interactive-check.exp` (vim and htop in a real pty, across a daemon restart). Verified on macOS (arm64) and Linux (Ubuntu, arm64, via OrbStack), including the `ssh host swarmd bridge` path. Next: M2, starting with an unchanged build of the Warp fork and the shell-integration spike (§13, risk 2).
 
