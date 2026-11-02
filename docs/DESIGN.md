@@ -455,7 +455,7 @@ Verified against the Linux VM (`orb`):
 
 **Hosts outside `~/.ssh/config` (2026-10-30).** Typing `user@host` or a dotted host name in the session picker (⇧⌘P) offers "Connect to …". Connect… also ends with "Other Host…", which opens the picker. Input with spaces, or anything that could act as an ssh option (leading `-`, `=`, …), isn't offered. The address goes through the normal connect flow: ssh check, install offer, then the host's sessions. A failed connection shows ssh's own error and isn't remembered. Verified with `nobody@example.invalid` ("Could not resolve hostname"). Ports need an `~/.ssh/config` entry; `user@host:port` isn't parsed.
 
-**Not done yet:** remote sessions set up before the bash title fix keep stale titles until re-warpified.
+**Done (2026-11-01):** the two `orb` sessions set up before the bash title fix had the old hook loaded (names like "..nset _hostname _user _msg"). Warp's in-band commands run in a background subshell, so they can't redefine a function in the shell; the corrected check was typed into each shell once instead, wrapping the old `warp_set_title_active_on_preexec`. Both show `swarm-test:~` again and keep it after commands.
 
 **Unit tests.** The fork's `warp` library tests now build and pass for Swarm's own changes. Under test, daemon sessions are off and Warp's service hiding is off, so sharing stays covered. Upstream runs these with `cargo nextest`, one process per test. Under a single-process `cargo test`, 12 upstream tests (terminal view, notebooks, telemetry, …) fail from shared global state, and each passes on its own.
 
@@ -705,6 +705,17 @@ How the reattach budget is met: not by tail-first rendering (Warp's block list c
 - No network listener by default. Remote access is only through ssh as the same user.
 - Ring buffers live in memory only; no scrollback on disk by default (secrets). Spill-to-disk is opt-in and encrypted with a key that never leaves the session's shim (see "Scrollback beyond 16 MB").
 - Env passed to new sessions is filtered (don't forward GUI-specific vars like `SSH_AUTH_SOCK` of the laptop to a remote host unless asked).
+- **Dependency audit (2026-11-01, before 0.1):** Dependabot alerts are on for both repos, and `cargo audit` was run on both lockfiles.
+  - **swarm-term:** no vulnerabilities. One warning: `atomic-polyfill` is unmaintained (via postcard).
+  - **App fork:** 29 vulnerabilities, down to 10 after semver updates, `plist` 1.10 (drops `quick-xml` 0.30) and `zip` 9 with deflate only. None of the 10 can be fixed without a new major version upstream:
+    - Not built for macOS: `quick-xml` 0.37 (Windows notifications and Wayland), and `zip` 7 (an optional ML feature).
+    - Build time only: `rkyv` 0.7, inside the `cynic` code generator.
+    - Warp's cloud and telemetry code: `crypto-bigint` 0.5, a timing issue reached through `p256`. Also `zstd` 0.13 and `zstd-safe` 7, whose issues are in decompressing legacy or seekable frames; they're used by OpenTelemetry export and the local search index.
+  - **Dependabot** reported no alerts for swarm-term. For swarm-app it reported 12, from `Cargo.lock` and from the dev-only GraphQL codegen's `yarn.lock`. Fixes:
+    - `zip` 9.2.2, including the critical alert.
+    - `aws-smithy-json` 0.62.7. The AWS crates stay on versions that build with Rust 1.92.
+    - In the GraphQL codegen: `shell-quote`, `@graphql-tools/executor-legacy-ws`, `@graphql-tools/utils` 12 and `minimatch` 11. Checked by regenerating `api/schema.graphql` offline.
+  - **Still open:** the `zip` 7 alerts, which come only from `candle-core` behind the `onnx_candle` feature, which isn't built.
 
 ## 11. Tech choices (Rust)
 
