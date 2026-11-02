@@ -747,8 +747,8 @@ fn wait_readable(fd: RawFd, timeout: Duration) -> std::io::Result<bool> {
         libc::FD_ZERO(&mut set);
         libc::FD_SET(fd, &mut set);
         let mut tv = libc::timeval {
-            tv_sec: timeout.as_secs() as libc::time_t,
-            tv_usec: timeout.subsec_micros() as libc::suseconds_t,
+            tv_sec: timeout.as_secs() as _,
+            tv_usec: timeout.subsec_micros() as _,
         };
         let rc = libc::select(fd + 1, &mut set, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv);
         if rc < 0 {
