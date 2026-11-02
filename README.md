@@ -5,10 +5,23 @@ daemon, local or remote. See [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Status
 
-Milestones M0–M1 (daemon core) are working on macOS and Linux: sessions
-survive closing the client and restarting the daemon, and can be listed,
-attached, detached and removed from the command line, locally or over ssh.
-The GUI (Warp fork, M2) isn't started yet.
+**0.1** is the first release: `Swarm.app` for macOS 13 or later, a
+universal build for Apple silicon and Intel. Download the DMG from
+[Releases](https://github.com/arturborycki/swarm-term/releases).
+
+- **Persistent tabs:** every tab is a session owned by `swarmd`, so it keeps
+  running when you close the window, quit the app or restart the daemon.
+- **Local or remote:** sessions run on this Mac or on Linux and macOS hosts
+  over ssh. The app installs `swarmd` on remote hosts itself.
+- **The GUI:** a fork of Warp, with blocks, the input editor and completions,
+  in its own design.
+- **Daemon updates:** `swarm-shim` is updated in place without ending
+  sessions.
+- **Scrollback:** 16 MB per session is kept in memory. More can optionally be
+  kept on disk, encrypted.
+
+The 0.1 DMG is not notarized yet, so Gatekeeper blocks the first launch.
+Right-click Swarm.app and choose Open.
 
 | Crate | What it is |
 |---|---|
