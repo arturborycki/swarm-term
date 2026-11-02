@@ -711,6 +711,11 @@ How the reattach budget is met: not by tail-first rendering (Warp's block list c
     - Not built for macOS: `quick-xml` 0.37 (Windows notifications and Wayland), and `zip` 7 (an optional ML feature).
     - Build time only: `rkyv` 0.7, inside the `cynic` code generator.
     - Warp's cloud and telemetry code: `crypto-bigint` 0.5, a timing issue reached through `p256`. Also `zstd` 0.13 and `zstd-safe` 7, whose issues are in decompressing legacy or seekable frames; they're used by OpenTelemetry export and the local search index.
+  - **Dependabot** reported no alerts for swarm-term. For swarm-app it reported 12, from `Cargo.lock` and from the dev-only GraphQL codegen's `yarn.lock`. Fixes:
+    - `zip` 9.2.2, including the critical alert.
+    - `aws-smithy-json` 0.62.7. The AWS crates stay on versions that build with Rust 1.92.
+    - In the GraphQL codegen: `shell-quote`, `@graphql-tools/executor-legacy-ws`, `@graphql-tools/utils` 12 and `minimatch` 11. Checked by regenerating `api/schema.graphql` offline.
+  - **Still open:** the `zip` 7 alerts, which come only from `candle-core` behind the `onnx_candle` feature, which isn't built.
 
 ## 11. Tech choices (Rust)
 
