@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use swarm_client::{Attachment, Client, StreamEvent};
 use swarm_proto::{
-    paths, write_frame, AttachMode, CreateOpts, MetaUpdate, SessionEvent, SessionState, ShimRequest, Size,
+    paths, write_frame, AttachMode, CreateOpts, MetaUpdate, SessionEvent, SessionState, ShimRequest,
+    ShimUpgrade, ShimUpgradeOutcome, Size,
 };
 use tokio::net::UnixStream;
 use tokio::time::timeout;
@@ -290,6 +291,221 @@ async fn sessions_survive_daemon_restart() {
     read_until(&mut a, "before-restart").await;
     a.input(b"echo after-restart\n".to_vec()).await.unwrap();
     read_until(&mut a, "after-restart\r\n").await;
+}
+
+#[tokio::test]
+async fn shim_update_in_place_keeps_a_running_command_going() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let mut events = c.subscribe().await.unwrap();
+    let mut opts = sh_opts("counter");
+    opts.command = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "i=0; while [ $i -lt 300 ]; do i=$((i+1)); echo n$i; sleep 0.01; done; sleep 30".into(),
+    ];
+    let info = c.create(opts).await.unwrap();
+    let mut a = c.attach(&info.id, AttachMode::Full, None, false).await.unwrap();
+    let mut out = read_until(&mut a, "n20\r\n").await.0;
+
+    let results = c.upgrade_shims(true).await.unwrap();
+    assert_eq!(results, vec![ShimUpgrade { id: info.id.clone(), outcome: ShimUpgradeOutcome::Upgraded }]);
+
+    // The same attachment carries on: every line arrives once, in order.
+    out.push_str(&read_until(&mut a, "n300\r\n").await.0);
+    let numbers: Vec<u32> = out.split("\r\n").filter_map(|l| l.strip_prefix('n')?.parse().ok()).collect();
+    assert_eq!(numbers, (1..=300).collect::<Vec<_>>());
+
+    // Same process, still running, and never reported gone.
+    let listed = c.list().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].pid, info.pid);
+    assert!(listed[0].is_running());
+    while let Ok(ev) = events.try_recv() {
+        assert!(!matches!(ev, SessionEvent::Removed { .. }), "the session was reported removed");
+    }
+}
+
+#[tokio::test]
+async fn updated_shim_replays_its_scrollback_and_reports_the_exit_code() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let info = c.create(sh_opts("updated")).await.unwrap();
+    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    a.input(b"echo before-update\n".to_vec()).await.unwrap();
+    read_until(&mut a, "before-update\r\n").await;
+
+    for _ in 0..2 {
+        let results = c.upgrade_shims(true).await.unwrap();
+        assert_eq!(results[0].outcome, ShimUpgradeOutcome::Upgraded);
+    }
+
+    let mut b = c.attach(&info.id, AttachMode::Full, None, false).await.unwrap();
+    read_until(&mut b, "before-update").await;
+    b.input(b"echo after-update\n".to_vec()).await.unwrap();
+    read_until(&mut b, "after-update\r\n").await;
+    b.input(b"exit 7\n".to_vec()).await.unwrap();
+    let exited = timeout(Duration::from_secs(10), async {
+        loop {
+            match b.recv().await {
+                Some(StreamEvent::Exited { code, signal }) => return (code, signal),
+                Some(_) => continue,
+                None => panic!("stream ended without Exited"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(exited, (Some(7), None));
+}
+
+#[tokio::test]
+async fn a_shim_program_that_refuses_the_handoff_leaves_the_session_alone() {
+    let mut env = Env::new().await;
+    let id = {
+        let c = env.client().await;
+        let info = c.create(sh_opts("stays")).await.unwrap();
+        let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+        a.input(b"echo one\n".to_vec()).await.unwrap();
+        read_until(&mut a, "one\r\n").await;
+        info.id
+    };
+    // A daemon whose shim program can't take sessions over.
+    let refusing = env.dir.path().join("refusing-shim");
+    std::fs::write(&refusing, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&refusing, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    env.kill_daemon();
+    env.vars = vec![("SWARM_SHIM_PATH", refusing.display().to_string())];
+    env.start_daemon().await;
+
+    let c = env.client().await;
+    let results = c.upgrade_shims(true).await.unwrap();
+    assert!(matches!(&results[0].outcome, ShimUpgradeOutcome::Failed(_)), "{results:?}");
+    let mut a = c.attach(&id, AttachMode::Live, None, false).await.unwrap();
+    a.input(b"echo still-here\n".to_vec()).await.unwrap();
+    read_until(&mut a, "still-here\r\n").await;
+}
+
+/// Runs `swarmd <args>` against the test's daemon.
+fn swarmd_cli(env: &Env, args: &[&str]) {
+    let status = Command::new(env!("CARGO_BIN_EXE_swarmd"))
+        .args(args)
+        .env("SWARM_RUNTIME_DIR", env.runtime())
+        .env("SWARM_STATE_DIR", env.dir.path().join("state"))
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "swarmd {args:?} failed");
+}
+
+/// Everything a `History` attachment sends before live output.
+async fn read_history(att: &mut Attachment) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut at = att.replay_from;
+    timeout(Duration::from_secs(60), async {
+        while at < att.live_from {
+            match att.recv().await {
+                Some(StreamEvent::Output { offset, data, .. }) => {
+                    assert_eq!(offset, at, "history has a gap or overlap");
+                    at = offset + data.len() as u64;
+                    out.extend(data);
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+    })
+    .await
+    .expect("history did not arrive");
+    out
+}
+
+/// The numbers printed one per line (the terminal ends lines with `\r\n`,
+/// now and then `\r\r\n`).
+fn seq_numbers(bytes: &[u8]) -> Vec<u64> {
+    String::from_utf8_lossy(bytes).split('\n').filter_map(|l| l.trim_end_matches('\r').parse().ok()).collect()
+}
+
+#[tokio::test]
+async fn spill_to_disk_keeps_what_leaves_the_buffer_through_a_shim_update() {
+    let env = Env::new().await;
+    swarmd_cli(&env, &["spill", "on", "--limit-mb", "64"]);
+    let c = env.client().await;
+    let info = c.create(sh_opts("spilled")).await.unwrap();
+    let a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    // About 19 MB: more than the 16 MB kept in memory.
+    a.input(b"awk 'BEGIN { for (i = 1; i <= 2500000; i++) print i }'; echo seq-done\n".to_vec()).await.unwrap();
+    drop(a);
+    let total: u64 = (1..=2_500_000u64).map(|n| n.to_string().len() as u64 + 2).sum();
+    timeout(Duration::from_secs(60), async {
+        loop {
+            let s = c.list().await.unwrap().into_iter().find(|s| s.id == info.id).unwrap();
+            if s.buffer_end > total && s.foreground.is_none() {
+                assert!(s.buffer_start > 0, "the buffer should have wrapped");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("seq did not finish");
+
+    let check = |history: &[u8]| {
+        let numbers = seq_numbers(history);
+        assert_eq!(numbers.len(), 2_500_000, "every line is kept");
+        assert!(numbers.iter().zip(1..).all(|(n, i)| *n == i), "lines are in order, once each");
+    };
+    let mut h = c.attach(&info.id, AttachMode::History, None, true).await.unwrap();
+    assert!(h.replay_from < 1024, "history starts at the session's start");
+    check(&read_history(&mut h).await);
+    drop(h);
+
+    // On disk only ciphertext: no run of seq's output is there in the clear.
+    let spill_dir = env.dir.path().join("state/spill").join(&info.id);
+    let files: Vec<PathBuf> = std::fs::read_dir(&spill_dir).unwrap().map(|e| e.unwrap().path()).collect();
+    assert!(!files.is_empty(), "nothing was spilled");
+    for f in &files {
+        let bytes = std::fs::read(f).unwrap();
+        assert!(!bytes.windows(9).any(|w| w == b"\r\n123456\r\n" || w == b"0\r\n100001"), "plaintext in {f:?}");
+    }
+
+    // The spill and its key move with the session to an updated shim.
+    let results = c.upgrade_shims(true).await.unwrap();
+    assert_eq!(results[0].outcome, ShimUpgradeOutcome::Upgraded);
+    let mut h = c.attach(&info.id, AttachMode::History, None, true).await.unwrap();
+    check(&read_history(&mut h).await);
+    drop(h);
+
+    // Turning it off deletes what was spilled.
+    swarmd_cli(&env, &["spill", "off"]);
+    assert!(!spill_dir.exists(), "spill off should delete the files");
+}
+
+#[tokio::test]
+async fn removing_a_session_deletes_its_spilled_output() {
+    let env = Env::new().await;
+    swarmd_cli(&env, &["spill", "on", "--limit-mb", "8"]);
+    let c = env.client().await;
+    let info = c.create(sh_opts("short-lived")).await.unwrap();
+    let a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    a.input(b"head -c 20000000 /dev/zero | tr '\\0' y; echo; echo filled\n".to_vec()).await.unwrap();
+    drop(a);
+    let spill_dir = env.dir.path().join("state/spill").join(&info.id);
+    timeout(Duration::from_secs(60), async {
+        while std::fs::read_dir(&spill_dir).map(|d| d.count()).unwrap_or(0) < 2 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("nothing was spilled");
+    c.remove(&info.id).await.unwrap();
+    timeout(Duration::from_secs(10), async {
+        while spill_dir.exists() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the spill outlived its session");
 }
 
 #[tokio::test]
@@ -622,6 +838,15 @@ async fn restore_after_reboot_recreates_lost_sessions() {
 
 #[tokio::test]
 async fn full_attach_to_a_full_screen_app_ends_with_its_screen() {
+    full_screen_app_attach(false).await;
+}
+
+#[tokio::test]
+async fn a_full_screen_app_keeps_its_screen_across_a_shim_update() {
+    full_screen_app_attach(true).await;
+}
+
+async fn full_screen_app_attach(update_shim: bool) {
     let env = Env::new().await;
     let c = env.client().await;
     let info = c.create(sh_opts("altscreen")).await.unwrap();
@@ -637,6 +862,10 @@ async fn full_attach_to_a_full_screen_app_ends_with_its_screen() {
     .await
     .expect("alt screen not reported");
     a.detach().await.unwrap();
+    if update_shim {
+        let results = c.upgrade_shims(true).await.unwrap();
+        assert_eq!(results[0].outcome, ShimUpgradeOutcome::Upgraded);
+    }
 
     let mut b = c.attach(&info.id, AttachMode::Full, None, false).await.unwrap();
     let mut last = Vec::new();

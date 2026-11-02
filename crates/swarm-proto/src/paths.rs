@@ -89,12 +89,18 @@ pub fn uid() -> u32 {
 /// daemon, shims) call this first so they never keep a parent's pipes or
 /// sockets open, which would hang whoever waits for EOF on them.
 pub fn close_inherited_fds() {
+    close_inherited_fds_except(&[]);
+}
+
+/// Like `close_inherited_fds`, but keeps `keep`: descriptors handed over on
+/// purpose (a shim taking over a session from its previous program).
+pub fn close_inherited_fds_except(keep: &[i32]) {
     let dir = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
     let fds: Vec<i32> = match std::fs::read_dir(dir) {
         Ok(entries) => {
-            entries.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok()).filter(|&fd| fd > 2).collect()
+            entries.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok()).filter(|&fd| fd > 2 && !keep.contains(&fd)).collect()
         }
-        Err(_) => (3..1024).collect(),
+        Err(_) => (3..1024).filter(|fd| !keep.contains(fd)).collect(),
     };
     // The directory's own fd is in the list but already closed; close() on
     // it just fails with EBADF.

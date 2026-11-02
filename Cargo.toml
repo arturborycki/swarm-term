@@ -21,6 +21,7 @@ swarm-proto = { path = "crates/swarm-proto" }
 swarm-shim = { path = "crates/swarm-shim" }
 swarm-client = { path = "crates/swarm-client" }
 anyhow = "1"
+chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 libc = "0.2"

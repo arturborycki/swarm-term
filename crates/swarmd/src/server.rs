@@ -173,6 +173,11 @@ impl Server {
                 self.shutdown.notify_one();
                 Response::Ok
             }
+            Request::UpgradeShims { force } => Response::ShimsUpgraded(r.upgrade_shims(force).await),
+            Request::ApplySpill => {
+                r.apply_spill().await;
+                Response::Ok
+            }
             Request::Attach { .. } | Request::Subscribe => unreachable!("handled by the connection loop"),
         })
     }
@@ -190,7 +195,7 @@ async fn relay(
     size: Option<swarm_proto::Size>,
     mut input: mpsc::Receiver<ShimInput>,
 ) {
-    let att = match registry.attach(&session_id, desc, mode, size).await {
+    let att = match registry.attach(&session_id, desc.clone(), mode, size).await {
         Ok(a) => a,
         Err(e) => {
             let _ = out.send(ServerMsg::Response { id: request_id, result: Err(format!("{e:#}")) }).await;
@@ -202,38 +207,88 @@ async fn relay(
         return;
     }
 
-    let (mut shim_rd, mut shim_wr) = att.stream.into_split();
-    let to_shim = tokio::spawn(async move {
-        while let Some(msg) = input.recv().await {
-            let detach = matches!(msg, ShimInput::Detach);
-            if write_frame(&mut shim_wr, &msg).await.is_err() || detach {
-                break;
-            }
-        }
-    });
-
+    // Where the client's stream has got to, so it can carry on from there
+    // if the shim connection ends because the shim was updated in place.
+    let mut next = att.replay_from;
+    let mut size = size;
+    let mut exited = false;
+    let mut conn = att.stream;
     let reason = loop {
-        match read_frame::<_, ShimMsg>(&mut shim_rd).await {
-            Ok(Some(ShimMsg::Output { offset, data, replay })) => {
-                // Blocking here when the client is slow lets the shim's queue
-                // fill, which turns into `Lagged` instead of unbounded memory.
-                if out.send(ServerMsg::Output { stream, offset, data, replay }).await.is_err() {
-                    break None;
+        let (mut shim_rd, mut shim_wr) = conn.into_split();
+        // Frames are read in a task so a partial read is never cancelled.
+        let (frames_tx, mut frames) = mpsc::channel::<Result<ShimMsg, String>>(64);
+        let reader = tokio::spawn(async move {
+            loop {
+                let (frame, last) = match read_frame::<_, ShimMsg>(&mut shim_rd).await {
+                    Ok(Some(msg)) => (Ok(msg), false),
+                    Ok(None) => (Err("detached".to_string()), true),
+                    Err(e) => (Err(format!("session connection lost: {e}")), true),
+                };
+                if frames_tx.send(frame).await.is_err() || last {
+                    break;
                 }
             }
-            Ok(Some(ShimMsg::Exited { code, signal })) => {
-                let _ = out.send(ServerMsg::Exited { stream, code, signal }).await;
+        });
+        // `Some(reason)`: the shim connection ended; `None`: the client is
+        // done (detached, gone, or told to resume itself after lagging).
+        let ended: Option<String> = loop {
+            tokio::select! {
+                frame = frames.recv() => match frame {
+                    Some(Ok(ShimMsg::Output { offset, data, replay })) => {
+                        next = offset + data.len() as u64;
+                        // Blocking here when the client is slow lets the shim's
+                        // queue fill, which turns into `Lagged` instead of
+                        // unbounded memory.
+                        if out.send(ServerMsg::Output { stream, offset, data, replay }).await.is_err() {
+                            break None;
+                        }
+                    }
+                    Some(Ok(ShimMsg::Exited { code, signal })) => {
+                        exited = true;
+                        let _ = out.send(ServerMsg::Exited { stream, code, signal }).await;
+                    }
+                    Some(Ok(ShimMsg::Lagged { resume_at })) => {
+                        let _ = out.send(ServerMsg::Lagged { stream, resume_at }).await;
+                        break None;
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(reason)) => break Some(reason),
+                    None => break Some("detached".to_string()),
+                },
+                msg = input.recv() => match msg {
+                    Some(msg) => {
+                        if let ShimInput::Resize(s) = &msg {
+                            size = Some(*s);
+                        }
+                        let detach = matches!(msg, ShimInput::Detach);
+                        // A failed write shows up as the connection ending.
+                        let _ = write_frame(&mut shim_wr, &msg).await;
+                        if detach {
+                            break None;
+                        }
+                    }
+                    None => break None,
+                },
             }
-            Ok(Some(ShimMsg::Lagged { resume_at })) => {
-                let _ = out.send(ServerMsg::Lagged { stream, resume_at }).await;
-                break None;
+        };
+        reader.abort();
+        let Some(reason) = ended else { break None };
+        // A shim updated in place keeps its socket: carry on from `next` on
+        // its new program, unnoticed by the client.
+        if !exited {
+            let resumed = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                registry.attach(&session_id, desc.clone(), swarm_proto::AttachMode::ResumeFrom(next), size),
+            )
+            .await;
+            if let Ok(Ok(att)) = resumed {
+                tracing::debug!(session_id, next, "resumed the stream after the shim was updated");
+                conn = att.stream;
+                continue;
             }
-            Ok(Some(_)) => {}
-            Ok(None) => break Some("detached".to_string()),
-            Err(e) => break Some(format!("session connection lost: {e}")),
         }
+        break Some(reason);
     };
-    to_shim.abort();
     if let Some(reason) = reason {
         let _ = out.send(ServerMsg::StreamClosed { stream, reason }).await;
     }

@@ -8,12 +8,13 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Notify};
 
+use crate::handoff::{self, HandoffCtx};
 use crate::session::Session;
 
 /// Largest output frame sent to a client.
 const REPLAY_CHUNK: usize = 64 * 1024;
 
-pub async fn serve(session: Arc<Session>, listener: UnixListener, shutdown: Arc<Notify>) {
+pub async fn serve(session: Arc<Session>, listener: UnixListener, shutdown: Arc<Notify>, handoff: Arc<HandoffCtx>) {
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(s) => s,
@@ -32,15 +33,21 @@ pub async fn serve(session: Arc<Session>, listener: UnixListener, shutdown: Arc<
         }
         let session = session.clone();
         let shutdown = shutdown.clone();
+        let handoff = handoff.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(session, stream, shutdown).await {
+            if let Err(e) = handle(session, stream, shutdown, handoff).await {
                 tracing::debug!("connection ended: {e}");
             }
         });
     }
 }
 
-async fn handle(session: Arc<Session>, stream: UnixStream, shutdown: Arc<Notify>) -> std::io::Result<()> {
+async fn handle(
+    session: Arc<Session>,
+    stream: UnixStream,
+    shutdown: Arc<Notify>,
+    handoff: Arc<HandoffCtx>,
+) -> std::io::Result<()> {
     let (mut rd, mut wr) = stream.into_split();
     let Some(req) = read_frame::<_, ShimRequest>(&mut rd).await? else { return Ok(()) };
     match req {
@@ -59,6 +66,42 @@ async fn handle(session: Arc<Session>, stream: UnixStream, shutdown: Arc<Notify>
         ShimRequest::Trim { keep } => {
             session.trim(keep as usize);
             write_frame(&mut wr, &ShimMsg::Ok).await
+        }
+        ShimRequest::SetSpill(cfg) => {
+            let reply = match session.set_spill(cfg) {
+                Ok(()) => ShimMsg::Ok,
+                Err(e) => ShimMsg::Err(format!("{e:#}")),
+            };
+            write_frame(&mut wr, &reply).await
+        }
+        ShimRequest::Version => {
+            let reply = ShimMsg::Version {
+                build_id: swarm_proto::BUILD_ID.to_string(),
+                handoff: handoff::HANDOFF_VERSION,
+                generation: session.generation,
+            };
+            write_frame(&mut wr, &reply).await
+        }
+        ShimRequest::Upgrade { exe } => {
+            let exe = std::path::PathBuf::from(exe);
+            if !exe.is_absolute() {
+                return write_frame(&mut wr, &ShimMsg::Err(format!("not a program path: {exe:?}"))).await;
+            }
+            if !session.is_running() {
+                return write_frame(&mut wr, &ShimMsg::Err("the session has exited".into())).await;
+            }
+            if let Err(e) = handoff::check_exe(&exe).await {
+                return write_frame(&mut wr, &ShimMsg::Err(format!("{e:#}"))).await;
+            }
+            write_frame(&mut wr, &ShimMsg::Ok).await?;
+            drop(wr);
+            // Blocks this runtime thread; on success it never returns.
+            let err = tokio::task::spawn_blocking(move || handoff::hand_off(&session, &handoff, &exe)).await;
+            match err {
+                Ok(e) => tracing::warn!("in-place update failed; keeping the session here: {e:#}"),
+                Err(e) => tracing::warn!("in-place update failed: {e}"),
+            }
+            Ok(())
         }
         ShimRequest::Remove => {
             remove(&session).await;
@@ -94,6 +137,16 @@ async fn handle(session: Arc<Session>, stream: UnixStream, shutdown: Arc<Notify>
                     &ShimMsg::Attached { info: att.info.clone(), replay_from: att.replay_from, live_from: att.live_from },
                 )
                 .await?;
+                // `History`: what was spilled to disk comes first, a chunk at a time.
+                if let Some((spill, until)) = att.spill.take() {
+                    for piece in spill.pieces(until) {
+                        let s = spill.clone();
+                        let read = tokio::task::spawn_blocking(move || s.read(&piece, until)).await;
+                        if let Ok(Some((offset, bytes))) = read {
+                            send_replay(&mut wr, offset, &bytes).await?;
+                        }
+                    }
+                }
                 for (offset, bytes) in std::mem::take(&mut att.prelude) {
                     write_frame(&mut wr, &ShimMsg::Output { offset, data: bytes, replay: true }).await?;
                 }

@@ -24,7 +24,46 @@ pub fn output_time_mark(unix_ms: u64) -> Vec<u8> {
 }
 
 
+/// A ring's contents, carried to the next shim program on an in-place update.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RingState {
+    start: u64,
+    data: Vec<u8>,
+    boundaries: Vec<u64>,
+    times: Vec<(u64, u64)>,
+}
+
 impl Ring {
+    pub fn export(&self) -> RingState {
+        RingState {
+            start: self.start,
+            data: self.data.iter().copied().collect(),
+            boundaries: self.boundaries.iter().copied().collect(),
+            times: self.times.iter().copied().collect(),
+        }
+    }
+
+    /// A ring with `state`'s contents, trimmed to `capacity` if it was larger.
+    pub fn import(state: RingState, capacity: usize) -> Self {
+        let mut ring = Ring {
+            data: VecDeque::from(state.data),
+            start: state.start,
+            capacity,
+            boundaries: VecDeque::from(state.boundaries),
+            times: VecDeque::from(state.times),
+        };
+        if ring.boundaries.is_empty() && ring.start == 0 {
+            ring.boundaries.push_back(0);
+        }
+        ring.trim(capacity);
+        ring
+    }
+
+    /// The newest boundary still buffered (or the buffer's start).
+    pub fn last_boundary(&self) -> u64 {
+        self.boundaries.back().copied().unwrap_or(self.start)
+    }
+
     pub fn new(capacity: usize) -> Self {
         let mut boundaries = VecDeque::new();
         boundaries.push_back(0);
@@ -60,6 +99,35 @@ impl Ring {
         while self.times.front().is_some_and(|&(o, _)| o < self.start) {
             self.times.pop_front();
         }
+    }
+
+    /// Like `push`, and returns the bytes it dropped from the front, with
+    /// the offset they started at.
+    pub fn push_taking(&mut self, bytes: &[u8]) -> Option<(u64, Vec<u8>)> {
+        let overflow = (self.data.len() + bytes.len()).saturating_sub(self.capacity);
+        if overflow == 0 {
+            self.push(bytes);
+            return None;
+        }
+        let start = self.start;
+        let mut dropped: Vec<u8> = self.data.iter().take(overflow).copied().collect();
+        if overflow > self.data.len() {
+            dropped.extend_from_slice(&bytes[..overflow - self.data.len()]);
+        }
+        self.push(bytes);
+        Some((start, dropped))
+    }
+
+    /// Like `trim`, and returns the bytes it dropped, with their offset.
+    pub fn trim_taking(&mut self, keep: usize) -> Option<(u64, Vec<u8>)> {
+        let drop = self.data.len().saturating_sub(keep);
+        if drop == 0 {
+            return None;
+        }
+        let start = self.start;
+        let dropped: Vec<u8> = self.data.iter().take(drop).copied().collect();
+        self.trim(keep);
+        Some((start, dropped))
     }
 
     /// Drops all but the last `keep` bytes and releases the memory they used
@@ -233,7 +301,6 @@ impl Ring {
     }
 
     /// Bytes from `offset` to the end. `offset` must satisfy `contains`.
-    #[cfg(test)]
     pub fn slice_from(&self, offset: u64) -> Vec<u8> {
         let skip = (offset.saturating_sub(self.start)) as usize;
         self.data.range(skip.min(self.data.len())..).copied().collect()
@@ -243,6 +310,42 @@ impl Ring {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_taking_and_trim_taking_return_exactly_what_was_dropped() {
+        let mut r = Ring::new(8);
+        let mut seen = Vec::new();
+        for chunk in [&b"abcde"[..], b"fghij", b"klmnopqrstuvwxyz"] {
+            if let Some((off, d)) = r.push_taking(chunk) {
+                assert_eq!(off, seen.len() as u64);
+                seen.extend(d);
+            }
+        }
+        if let Some((off, d)) = r.trim_taking(3) {
+            assert_eq!(off, seen.len() as u64);
+            seen.extend(d);
+        }
+        seen.extend(r.slice_from(r.start()));
+        assert_eq!(seen, b"abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn export_and_import_keep_contents_offsets_boundaries_and_times() {
+        let mut r = Ring::new(16);
+        r.push(b"0123456789");
+        r.add_boundary(4);
+        r.add_time(6, 1234);
+        r.push(b"abcdefghij");
+        let restored = Ring::import(r.export(), 16);
+        assert_eq!((restored.start(), restored.end()), (r.start(), r.end()));
+        assert_eq!(restored.slice_from(restored.start()), r.slice_from(r.start()));
+        assert_eq!(restored.replay_start(), r.replay_start());
+        assert_eq!(restored.with_times(vec![(6, b"6789".to_vec())]), r.with_times(vec![(6, b"6789".to_vec())]));
+        // A smaller buffer on the other side keeps the newest bytes.
+        let smaller = Ring::import(r.export(), 8);
+        assert_eq!(smaller.slice_from(smaller.start()), b"cdefghij");
+        assert_eq!(smaller.end(), r.end());
+    }
 
     #[test]
     fn replay_pieces_cut_the_middle_of_long_blocks() {

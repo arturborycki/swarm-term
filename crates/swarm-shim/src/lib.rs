@@ -2,17 +2,20 @@
 //! serves it on `$RUNTIME/shims/<id>.sock`. It outlives `swarmd` and the GUI.
 
 mod buffer;
+pub mod handoff;
 mod scan;
 mod server;
 mod session;
+pub mod spill;
 
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use swarm_proto::{paths, CreateOpts, SessionState};
+use swarm_proto::{paths, CreateOpts, SessionState, SpillConfig};
 use tokio::net::UnixListener;
 use tokio::sync::Notify;
 
@@ -28,6 +31,20 @@ pub struct ShimConfig {
     pub scrollback: usize,
     /// How long an exited session's output is kept if nobody removes it.
     pub exit_retention: Duration,
+    /// Keep output that leaves the in-memory buffer on disk, encrypted.
+    pub spill: Option<SpillConfig>,
+    /// Set when this program takes over a session from the previous shim
+    /// program (an in-place update) instead of starting one.
+    pub adopt: Option<handoff::Adopt>,
+}
+
+/// The descriptors a shim program was handed by its predecessor (from
+/// `--pty-fd`, `--listen-fd` and `--adopt-state`), which must stay open.
+pub fn handed_over_fds(args: &[String]) -> Vec<i32> {
+    args.windows(2)
+        .filter(|w| matches!(w[0].as_str(), "--pty-fd" | "--listen-fd" | "--adopt-state"))
+        .filter_map(|w| w[1].parse().ok())
+        .collect()
 }
 
 impl ShimConfig {
@@ -38,6 +55,8 @@ impl ShimConfig {
         let mut opts = None;
         let mut scrollback = DEFAULT_SCROLLBACK;
         let mut exit_retention = DEFAULT_EXIT_RETENTION;
+        let (mut pid, mut generation, mut pty_fd, mut listen_fd, mut state_fd) = (None, 1, None, None, None);
+        let (mut spill_dir, mut spill_limit) = (None, None);
         let mut it = args.into_iter();
         while let Some(flag) = it.next() {
             let mut value = || it.next().with_context(|| format!("{flag} needs a value"));
@@ -52,6 +71,13 @@ impl ShimConfig {
                 "--retention-secs" => {
                     exit_retention = Duration::from_secs(value()?.parse().context("--retention-secs")?)
                 }
+                "--spill-dir" => spill_dir = Some(value()?),
+                "--spill-limit" => spill_limit = Some(value()?.parse().context("--spill-limit")?),
+                "--pid" => pid = Some(value()?.parse().context("--pid")?),
+                "--generation" => generation = value()?.parse().context("--generation")?,
+                "--pty-fd" => pty_fd = Some(value()?.parse().context("--pty-fd")?),
+                "--listen-fd" => listen_fd = Some(value()?.parse().context("--listen-fd")?),
+                "--adopt-state" => state_fd = Some(value()?.parse().context("--adopt-state")?),
                 other => bail!("unknown argument {other}"),
             }
         }
@@ -59,7 +85,21 @@ impl ShimConfig {
         if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
             bail!("invalid session id {id:?}");
         }
+        let adopt = match (pid, pty_fd, listen_fd, state_fd) {
+            (Some(pid), Some(pty_fd), Some(listen_fd), Some(state_fd)) => {
+                Some(handoff::Adopt { pid, generation, pty_fd, listen_fd, state_fd })
+            }
+            (None, None, None, None) => None,
+            _ => bail!("--pid, --pty-fd, --listen-fd and --adopt-state go together"),
+        };
+        let spill = match (spill_dir, spill_limit) {
+            (Some(dir), Some(limit)) => Some(SpillConfig { dir, limit }),
+            (None, None) => None,
+            _ => bail!("--spill-dir and --spill-limit go together"),
+        };
         Ok(ShimConfig {
+            spill,
+            adopt,
             id,
             runtime_dir: runtime_dir.context("--runtime-dir is required")?,
             opts: opts.unwrap_or_default(),
@@ -80,26 +120,44 @@ async fn async_run(cfg: ShimConfig) -> Result<()> {
     paths::ensure_private_dir(&cfg.runtime_dir)?;
     paths::ensure_private_dir(&shims)?;
     let sock = paths::shim_socket(&cfg.runtime_dir, &cfg.id);
-    if sock.exists() {
-        if tokio::net::UnixStream::connect(&sock).await.is_ok() {
-            bail!("a shim for {} is already running", cfg.id);
+    let (session, listener) = match &cfg.adopt {
+        // An in-place update: the socket is already bound, and listening.
+        Some(adopt) => {
+            let std_listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(adopt.listen_fd) };
+            std_listener.set_nonblocking(true)?;
+            let listener = UnixListener::from_std(std_listener)?;
+            (handoff::adopt(&cfg.id, cfg.scrollback, adopt)?, listener)
         }
-        std::fs::remove_file(&sock)?;
-    }
-    let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
-    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
-
-    let session = match Session::spawn(&cfg.id, &cfg.opts, cfg.scrollback) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = std::fs::remove_file(&sock);
-            return Err(e);
+        None => {
+            if sock.exists() {
+                if tokio::net::UnixStream::connect(&sock).await.is_ok() {
+                    bail!("a shim for {} is already running", cfg.id);
+                }
+                std::fs::remove_file(&sock)?;
+            }
+            let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
+            std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+            let session = match Session::spawn(&cfg.id, &cfg.opts, cfg.scrollback, cfg.spill.as_ref()) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&sock);
+                    return Err(e);
+                }
+            };
+            tracing::info!(id = %cfg.id, pid = session.pid(), "session started");
+            (session, listener)
         }
     };
-    tracing::info!(id = %cfg.id, pid = session.pid(), "session started");
+    let handoff = Arc::new(handoff::HandoffCtx {
+        id: cfg.id.clone(),
+        runtime_dir: cfg.runtime_dir.clone(),
+        scrollback: cfg.scrollback,
+        exit_retention: cfg.exit_retention,
+        listen_fd: listener.as_raw_fd(),
+    });
 
     let shutdown = Arc::new(Notify::new());
-    tokio::spawn(server::serve(session.clone(), listener, shutdown.clone()));
+    tokio::spawn(server::serve(session.clone(), listener, shutdown.clone(), handoff));
 
     let fg = session.clone();
     tokio::spawn(async move {
@@ -121,6 +179,8 @@ async fn async_run(cfg: ShimConfig) -> Result<()> {
         _ = exited => tracing::info!(id = %cfg.id, "exit retention passed"),
     }
     let _ = std::fs::remove_file(&sock);
+    // The session is gone: so is what it spilled.
+    let _ = session.set_spill(None);
     // Give in-flight replies a moment to reach their sockets.
     tokio::time::sleep(Duration::from_millis(50)).await;
     Ok(())

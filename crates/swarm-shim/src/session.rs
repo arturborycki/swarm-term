@@ -1,20 +1,23 @@
 //! The PTY, its child process and everything attached clients share.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use swarm_proto::{
-    now_ms, AttachMode, ClientDesc, CreateOpts, MetaUpdate, SessionInfo, SessionState, ShimMsg, Size,
+    now_ms, AttachMode, ClientDesc, CreateOpts, MetaUpdate, SessionInfo, SessionState, ShimMsg, Size, SpillConfig,
 };
 use tokio::sync::{mpsc, watch};
 
 use crate::buffer::Ring;
 use crate::scan::Scanner;
+use crate::spill::Spill;
 
 /// Output chunks a client may have queued before it is considered lagged.
 const CLIENT_QUEUE: usize = 1024;
@@ -23,19 +26,79 @@ pub const ACTIVITY_NOTIFY_INTERVAL: Duration = Duration::from_secs(1);
 const NO_LAG: u64 = u64::MAX;
 
 pub struct Session {
-    inner: Mutex<Inner>,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    pub(crate) inner: Mutex<Inner>,
+    /// The PTY's master side. Kept as a plain descriptor so an in-place
+    /// update can hand it to the next shim program.
+    pub(crate) master: OwnedFd,
     input_tx: std::sync::mpsc::Sender<Vec<u8>>,
+    /// Input chunks queued for the writer thread and not yet written.
+    pub(crate) pending_input: Arc<AtomicUsize>,
     info_tx: watch::Sender<SessionInfo>,
     pid: u32,
     reader_done: (Mutex<bool>, Condvar),
-    // Kept so the child handle isn't dropped; reaping is done with waitpid.
-    _child: Mutex<Box<dyn Child + Send + Sync>>,
+    pub(crate) reader_ctl: ReaderCtl,
+    /// How many times this session's shim program was replaced in place.
+    pub(crate) generation: u32,
+}
+
+/// Lets an in-place update stop the output reader at a safe point: between
+/// reads, so no output is read and then lost.
+#[derive(Default)]
+pub(crate) struct ReaderCtl {
+    state: Mutex<ReaderState>,
+    cv: Condvar,
+}
+
+#[derive(Default)]
+struct ReaderState {
+    paused: bool,
+    parked: bool,
+    finished: bool,
+}
+
+impl ReaderCtl {
+    /// Called by the reader between reads; waits while paused.
+    fn park_if_paused(&self) {
+        let mut st = self.state.lock().unwrap();
+        if !st.paused {
+            return;
+        }
+        st.parked = true;
+        self.cv.notify_all();
+        while st.paused {
+            st = self.cv.wait(st).unwrap();
+        }
+        st.parked = false;
+    }
+
+    fn finish(&self) {
+        self.state.lock().unwrap().finished = true;
+        self.cv.notify_all();
+    }
+
+    /// Asks the reader to stop and waits until it has. False if it didn't
+    /// within `timeout` or has already finished (the PTY closed).
+    pub(crate) fn pause(&self, timeout: Duration) -> bool {
+        let mut st = self.state.lock().unwrap();
+        st.paused = true;
+        let (st, _) = self.cv.wait_timeout_while(st, timeout, |st| !st.parked && !st.finished).unwrap();
+        st.parked && !st.finished
+    }
+
+    pub(crate) fn resume(&self) {
+        self.state.lock().unwrap().paused = false;
+        self.cv.notify_all();
+    }
 }
 
 /// Warp hooks that describe the whole shell session, kept outside the ring so
 /// a replay can still start with them after the ring has dropped them.
 const STICKY_HOOKS: [&str; 2] = ["InitShell", "Bootstrapped"];
+
+/// The `'static` name of a sticky hook, for state handed over by name.
+pub(crate) fn sticky_hook_name(name: &str) -> Option<&'static str> {
+    STICKY_HOOKS.iter().copied().find(|n| *n == name)
+}
 
 /// Warp hooks whose time is the start or end of a command; a replay marks
 /// them with it so the client's blocks keep their real times.
@@ -43,7 +106,8 @@ const TIMED_HOOKS: [&str; 3] = ["Precmd", "Preexec", "CommandFinished"];
 
 /// The hooks that open a Warp block (`Precmd`, then `Preexec` with the
 /// command), so a replay that starts inside that block's output can reopen it.
-struct BlockHeader {
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BlockHeader {
     precmd_at: u64,
     preexec_at: u64,
     /// When the command started (ms since the epoch).
@@ -68,24 +132,45 @@ const REPLAY_BLOCK_HEAD: usize = 64 * 1024;
 /// How many recent block headers are kept.
 const BLOCK_HEADERS: usize = 64;
 
-struct Inner {
-    ring: Ring,
+pub(crate) struct Inner {
+    pub(crate) ring: Ring,
     /// Latest `InitShell` / `Bootstrapped` hook: (offset, complete bytes).
-    sticky: Vec<(&'static str, u64, Vec<u8>)>,
+    pub(crate) sticky: Vec<(&'static str, u64, Vec<u8>)>,
     /// Latest `Precmd` hook (offset, bytes), until its `Preexec` arrives.
-    pending_precmd: Option<(u64, Vec<u8>)>,
+    pub(crate) pending_precmd: Option<(u64, Vec<u8>)>,
     /// Recent commands' block headers, oldest first.
-    headers: std::collections::VecDeque<BlockHeader>,
+    pub(crate) headers: std::collections::VecDeque<BlockHeader>,
     /// The terminal screen as the output left it, for full-screen apps.
-    screen: vt100::Parser,
-    scanner: Scanner,
-    info: SessionInfo,
+    pub(crate) screen: vt100::Parser,
+    pub(crate) scanner: Scanner,
+    pub(crate) info: SessionInfo,
     clients: HashMap<u64, Slot>,
-    next_client: u64,
+    pub(crate) next_client: u64,
+    /// Where output leaving `ring` goes, if spill-to-disk is on.
+    pub(crate) spill: Option<Arc<Spill>>,
     last_notify: Instant,
     /// An activity change was held back by the notify interval; the periodic
     /// `refresh` publishes it, so the last output's numbers aren't lost.
     unpublished: bool,
+}
+
+impl Inner {
+    pub(crate) fn new(ring: Ring, screen: vt100::Parser, info: SessionInfo) -> Inner {
+        Inner {
+            ring,
+            sticky: Vec::new(),
+            pending_precmd: None,
+            headers: Default::default(),
+            screen,
+            scanner: Scanner::default(),
+            info,
+            clients: HashMap::new(),
+            next_client: 1,
+            spill: None,
+            last_notify: Instant::now(),
+            unpublished: false,
+        }
+    }
 }
 
 struct Slot {
@@ -115,6 +200,8 @@ pub struct Attachment {
     pub exited: Option<(Option<i32>, Option<i32>)>,
     /// The session is in a full-screen app: nudge its size so it repaints.
     pub wants_repaint: bool,
+    /// `History` attach: spilled output before this offset, to send first.
+    pub spill: Option<(Arc<Spill>, u64)>,
 }
 
 impl Attachment {
@@ -125,7 +212,7 @@ impl Attachment {
 }
 
 impl Session {
-    pub fn spawn(id: &str, opts: &CreateOpts, scrollback: usize) -> Result<Arc<Session>> {
+    pub fn spawn(id: &str, opts: &CreateOpts, scrollback: usize, spill: Option<&SpillConfig>) -> Result<Arc<Session>> {
         let size = opts.size;
         let pair = native_pty_system()
             .openpty(PtySize { rows: size.rows.max(1), cols: size.cols.max(1), pixel_width: 0, pixel_height: 0 })
@@ -156,8 +243,10 @@ impl Session {
         drop(pair.slave);
         let pid = child.process_id().context("child has no pid")?;
 
-        let mut reader = pair.master.try_clone_reader().context("pty reader")?;
-        let mut writer = pair.master.take_writer().context("pty writer")?;
+        let master = dup_fd(pair.master.as_raw_fd().context("the PTY has no descriptor")?)?;
+        // The child is reaped with waitpid; its handle isn't needed.
+        drop(child);
+        drop(pair.master);
 
         let now = now_ms();
         let info = SessionInfo {
@@ -179,34 +268,47 @@ impl Session {
             buffer_end: 0,
             alt_screen: false,
         };
-        let (info_tx, _) = watch::channel(info.clone());
+        let mut inner = Inner::new(Ring::new(scrollback), vt100::Parser::new(info.size.rows, info.size.cols, 0), info);
+        if let Some(cfg) = spill {
+            match Spill::create(cfg, id) {
+                Ok(s) => inner.spill = Some(s),
+                Err(e) => tracing::warn!(id, "spill-to-disk is off for this session: {e:#}"),
+            }
+        }
+        Session::start(master, pid, inner, 0)
+    }
+
+    /// Takes over a session from the previous shim program (an in-place
+    /// update): the same PTY and child, with the state it handed over.
+    pub(crate) fn adopt(master: OwnedFd, pid: u32, inner: Inner, generation: u32) -> Result<Arc<Session>> {
+        Session::start(master, pid, inner, generation)
+    }
+
+    /// Starts the reader, writer and child-wait threads around `master`.
+    fn start(master: OwnedFd, pid: u32, inner: Inner, generation: u32) -> Result<Arc<Session>> {
+        let mut reader = File::from(dup_fd(master.as_raw_fd())?);
+        let mut writer = File::from(dup_fd(master.as_raw_fd())?);
+        let (info_tx, _) = watch::channel(inner.info.clone());
         let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let pending_input = Arc::new(AtomicUsize::new(0));
 
         let session = Arc::new(Session {
-            inner: Mutex::new(Inner {
-                ring: Ring::new(scrollback),
-                sticky: Vec::new(),
-                pending_precmd: None,
-                headers: Default::default(),
-                screen: vt100::Parser::new(info.size.rows, info.size.cols, 0),
-                scanner: Scanner::default(),
-                info,
-                clients: HashMap::new(),
-                next_client: 1,
-                last_notify: Instant::now(),
-                unpublished: false,
-            }),
-            master: Mutex::new(pair.master),
+            inner: Mutex::new(inner),
+            master,
             input_tx,
+            pending_input: pending_input.clone(),
             info_tx,
             pid,
             reader_done: (Mutex::new(false), Condvar::new()),
-            _child: Mutex::new(child),
+            reader_ctl: ReaderCtl::default(),
+            generation,
         });
 
         std::thread::Builder::new().name("pty-writer".into()).spawn(move || {
             for data in input_rx {
-                if writer.write_all(&data).and_then(|_| writer.flush()).is_err() {
+                let ok = writer.write_all(&data).and_then(|_| writer.flush()).is_ok();
+                pending_input.fetch_sub(1, Ordering::AcqRel);
+                if !ok {
                     break;
                 }
             }
@@ -214,15 +316,25 @@ impl Session {
 
         let s = session.clone();
         std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
+            let fd = reader.as_raw_fd();
             let mut buf = vec![0u8; 64 * 1024];
             loop {
+                s.reader_ctl.park_if_paused();
+                match wait_readable(fd, Duration::from_millis(100)) {
+                    Ok(false) => continue,
+                    Ok(true) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => s.on_output(&buf[..n]),
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                     Err(_) => break,
                 }
             }
+            s.reader_ctl.finish();
             let (lock, cv) = &s.reader_done;
             *lock.lock().unwrap() = true;
             cv.notify_all();
@@ -244,7 +356,14 @@ impl Session {
     fn on_output(&self, data: &[u8]) {
         let mut inner = self.inner.lock().unwrap();
         let offset = inner.ring.end();
-        inner.ring.push(data);
+        match inner.spill.clone() {
+            Some(spill) => {
+                if let Some((at, dropped)) = inner.ring.push_taking(data) {
+                    spill.append(at, &dropped);
+                }
+            }
+            None => inner.ring.push(data),
+        }
         inner.screen.process(data);
         let ev = inner.scanner.feed(offset, data);
         for b in ev.boundaries {
@@ -338,11 +457,13 @@ impl Session {
 
     pub fn attach(&self, desc: ClientDesc, mode: AttachMode, size: Option<Size>) -> Attachment {
         let mut inner = self.inner.lock().unwrap();
+        let history = mode == AttachMode::History;
         let replay_from = match mode {
             AttachMode::Full => inner.ring.replay_start(),
             AttachMode::ResumeFrom(o) if inner.ring.contains(o) => o,
             AttachMode::ResumeFrom(_) => inner.ring.replay_start(),
             AttachMode::Live => inner.ring.end(),
+            AttachMode::History => inner.ring.start(),
         };
         let full = matches!(mode, AttachMode::Full) || (matches!(mode, AttachMode::ResumeFrom(o) if !inner.ring.contains(o)));
         // The ring may have dropped the start of a command whose output it
@@ -365,8 +486,18 @@ impl Session {
             }
         }
         let live_from = inner.ring.end();
-        let replay = inner.ring.replay_pieces(replay_from, REPLAY_BLOCK_HEAD, REPLAY_BLOCK_LINES);
-        let replay = inner.ring.with_times(replay);
+        let replay = if history {
+            // Everything, as it was written: no cut blocks, no time marks.
+            inner.ring.slice(replay_from, live_from).map(|b| vec![(replay_from, b)]).unwrap_or_default()
+        } else {
+            let replay = inner.ring.replay_pieces(replay_from, REPLAY_BLOCK_HEAD, REPLAY_BLOCK_LINES);
+            inner.ring.with_times(replay)
+        };
+        let spill = inner.spill.clone().filter(|_| history).map(|s| (s, replay_from));
+        let replay_from = spill
+            .as_ref()
+            .and_then(|(s, until)| s.pieces(*until).first().map(|p| p.start()))
+            .unwrap_or(replay_from);
         let prelude = if full {
             let mut prelude: Vec<(u64, Vec<u8>)> =
                 inner.sticky.iter().filter(|(_, off, _)| *off < replay_from).map(|(_, off, b)| (*off, b.clone())).collect();
@@ -399,7 +530,7 @@ impl Session {
         });
         self.notify(&mut inner, true);
         let info = self.snapshot(&inner);
-        Attachment { client_id, rx, lag, info, replay_from, live_from, replay, prelude, screen, exited, wants_repaint }
+        Attachment { client_id, rx, lag, info, replay_from, live_from, replay, prelude, screen, exited, wants_repaint, spill }
     }
 
     pub fn detach(&self, client_id: u64) {
@@ -426,7 +557,10 @@ impl Session {
         }
         inner.info.last_input_ms = now_ms();
         drop(inner);
-        let _ = self.input_tx.send(data);
+        self.pending_input.fetch_add(1, Ordering::AcqRel);
+        if self.input_tx.send(data).is_err() {
+            self.pending_input.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 
     pub fn client_resize(&self, client_id: u64, size: Size) {
@@ -478,8 +612,10 @@ impl Session {
     }
 
     fn raw_resize(&self, size: Size) {
-        let master = self.master.lock().unwrap();
-        let _ = master.resize(PtySize { rows: size.rows, cols: size.cols, pixel_width: 0, pixel_height: 0 });
+        let ws = libc::winsize { ws_row: size.rows, ws_col: size.cols, ws_xpixel: 0, ws_ypixel: 0 };
+        unsafe {
+            libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &ws);
+        }
     }
 
     pub fn kill(&self, signal: i32) -> Result<()> {
@@ -518,9 +654,31 @@ impl Session {
     /// Drops all but the last `keep` bytes of scrollback and frees the memory.
     pub fn trim(&self, keep: usize) {
         let mut inner = self.inner.lock().unwrap();
-        if inner.ring.trim(keep) {
+        let trimmed = match inner.spill.clone() {
+            Some(spill) => inner.ring.trim_taking(keep).map(|(at, dropped)| spill.append(at, &dropped)).is_some(),
+            None => inner.ring.trim(keep),
+        };
+        if trimmed {
             self.notify(&mut inner, true);
         }
+    }
+
+    /// Starts (`Some`) or stops spilling to disk; stopping deletes the spill.
+    pub fn set_spill(&self, cfg: Option<SpillConfig>) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        match cfg {
+            None => {
+                if let Some(spill) = inner.spill.take() {
+                    spill.destroy();
+                }
+            }
+            Some(cfg) if inner.spill.is_none() => {
+                let id = inner.info.id.clone();
+                inner.spill = Some(Spill::create(&cfg, &id)?);
+            }
+            Some(_) => {}
+        }
+        Ok(())
     }
 
     pub fn info(&self) -> SessionInfo {
@@ -544,7 +702,7 @@ impl Session {
     }
 
     fn foreground(&self) -> Option<String> {
-        let leader = self.master.lock().unwrap().process_group_leader()?;
+        let leader = unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) };
         if leader <= 0 || leader as u32 == self.pid {
             return None;
         }
@@ -569,6 +727,34 @@ impl Session {
         inner.unpublished = false;
         let snap = self.snapshot(inner);
         self.info_tx.send_replace(snap);
+    }
+}
+
+/// A close-on-exec duplicate of `fd`.
+pub(crate) fn dup_fd(fd: RawFd) -> Result<OwnedFd> {
+    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if dup < 0 {
+        return Err(std::io::Error::last_os_error()).context("dup");
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(dup) })
+}
+
+/// Waits up to `timeout` for `fd` to be readable. `select`, not `poll`:
+/// macOS's `poll` doesn't support terminal devices.
+fn wait_readable(fd: RawFd, timeout: Duration) -> std::io::Result<bool> {
+    unsafe {
+        let mut set: libc::fd_set = std::mem::zeroed();
+        libc::FD_ZERO(&mut set);
+        libc::FD_SET(fd, &mut set);
+        let mut tv = libc::timeval {
+            tv_sec: timeout.as_secs() as libc::time_t,
+            tv_usec: timeout.subsec_micros() as libc::suseconds_t,
+        };
+        let rc = libc::select(fd + 1, &mut set, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv);
+        if rc < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(rc > 0)
     }
 }
 

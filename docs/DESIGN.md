@@ -91,13 +91,68 @@ The app works fully without a local daemon session ever being used: a user can w
 Child exits → shim records exit status, keeps the buffer for `exited_retention` (default 10 min, or until a client acknowledges the exit), then exits. The tab shows "Process exited (code N) — [Restart] [Close]".
 
 ### Daemon upgrade
-`swarmd` is restarted in place; shims are untouched. Shim upgrade requires session restart (or later: PTY fd handoff via `SCM_RIGHTS` to a new shim — stretch goal).
+`swarmd` is restarted in place; shims are untouched. Shims are then updated in place too, without restarting their sessions (see "Shim updates in place" below).
 
 **Built (2026-10-31).** Every build carries an ID, `swarm_proto::BUILD_ID`: a hash of the swarm crates' sources and `Cargo.lock`, made by `swarm-proto`'s build script with a hash that doesn't depend on the Rust version. A Mac build and a Linux build from the same sources get the same ID. `swarmd --version` and the daemon's `Welcome` report `0.1.0+<id>`. When the app connects to a daemon from another build, it updates it, once per app run per host:
 - **This Mac:** the app stops the daemon and starts its own `swarmd`.
 - **A remote host:** the app first copies its `swarmd`, `swarm-shim` and `swarmctl` over, the same way as a first install. It only does this if the copy there is one Swarm installed (in `~/.local/share/swarm/bin`) and the app's Linux build contains the current version string, so an outdated `scripts/build-linux.sh` output is never pushed.
 
-Sessions keep running and tabs reconnect. Checked: with the app updated, both the local daemon and `orb`'s were updated within about a second at launch, local and remote tabs kept their history, and new commands worked. Sessions started before an update keep their old shim until they're restarted.
+Sessions keep running and tabs reconnect. Checked: with the app updated, both the local daemon and `orb`'s were updated within about a second at launch, local and remote tabs kept their history, and new commands worked.
+
+### Shim updates in place (built 2026-11-02)
+
+When `swarmd` starts, it asks each running session's shim which build it runs (`ShimRequest::Version`), and moves every shim from another build to its own `swarm-shim`, one at a time, without restarting the session. `swarmctl daemon upgrade-shims [--force]` does the same on demand and prints what happened to each session.
+
+**How.** The shim replaces its own program with the new one (`exec`), rather than passing the PTY to a separate process over a socket (`SCM_RIGHTS`, the original idea). With `exec` the process stays the same, so the shell is still its child and its exit code still comes through `waitpid`, which a new process couldn't do. The steps:
+- `swarmd` sends `ShimRequest::Upgrade { exe }`. The shim first runs `exe --accepts-handoff <version>`. It goes ahead only if the new program reads the handoff format it writes (`HANDOFF_VERSION`, now 2; programs read 1 and 2), and it doesn't for a session that has exited.
+- The shim stops its output reader between reads, so output it hasn't read stays in the PTY for the new program, and none is read and then lost. It waits until typed input already accepted has been written. It then holds the session's lock, so nothing changes from there on.
+- It writes its state to a file in the private runtime folder, then unlinks the file and keeps only the open descriptor. The state is the scrollback with its boundaries and command times, the saved `InitShell`/`Bootstrapped` hooks and block headers, and the screen as escape sequences. It clears close-on-exec on the PTY, the listening socket and that file, and `exec`s the new program with their numbers.
+- The new program keeps those descriptors, reads the state and serves on the same, still-listening socket. Connections made during the switch wait in the socket's queue. It rebuilds the screen from the saved sequences, and the output scanner by feeding it the output since the last prompt again, discarding what that finds.
+- If the `exec` fails, the old program resumes as if nothing happened. If the new program can't read the state, it keeps the session (same PTY and shell) with empty scrollback rather than losing it.
+- `swarmd` treats a shim connection that ends while the shim's socket still answers as an update, not as the session going away. The watch reconnects without a `Removed` event. Attached streams reattach with `ResumeFrom` the last offset they delivered, at the client's latest size, so windows see a pause of a few milliseconds and no gap or repeat.
+- The shim reports a `generation` that counts its in-place updates; `swarmd` waits for it to go up to confirm the switch.
+
+Shims from before this change don't answer `Version`, so they're left alone (logged as predating in-place updates) and move to the new build when their session is restarted.
+
+**Checked.**
+- **End-to-end tests** (macOS and Linux in `orb`):
+  - A command printing 300 numbered lines keeps going through an update, and the attached stream gets every line once, in order. The session keeps its process ID and is never reported removed.
+  - After two updates in a row, the scrollback still replays and `exit 7` is reported as exit code 7.
+  - A full-screen app's screen is still sent on a full attach after an update.
+  - A daemon whose shim program refuses the handoff reports `Failed` and leaves the session working.
+- **In the app:**
+  - A session counting every half second moved to a new build when the relaunched app restarted `swarmd`. The new program had it 15 ms after the old one started handing over. The shim kept its process ID, and the session's replay shows ticks 1 to 292 with none missing or repeated.
+  - Sessions from before this change were skipped and kept running.
+
+**Protocol positions.** The wire format (postcard) writes an enum variant as its position, so a new request must go last: a daemon that put `SetSpill` before `Upgrade` was read by an older shim as `Upgrade` with an empty path, which that shim refused. `swarm-proto`'s `variants_keep_their_positions` test pins them now, and a shim refuses an upgrade to anything but an absolute path.
+
+### Scrollback beyond 16 MB (built 2026-11-02)
+
+Off by default. `swarmd spill on [--limit-mb N]` (or Settings → Daemon → "Keep scrollback beyond 16 MB on disk") keeps output that leaves a session's 16 MB in-memory buffer on disk, up to 256 MB per session by default. Then `swarmctl dump <session>` prints everything kept, oldest first (`--raw` for the bytes with their escape sequences; otherwise as plain text). The Warp tab itself doesn't show more than before, since Warp keeps its last 50,000 rows per block.
+
+- **Where:** `$STATE_DIR/spill/<session id>/`, private (`0700`/`0600`), one file per 1 MiB of output, named by its start offset.
+- **Encryption:** ChaCha20-Poly1305 with a random 256-bit key made by the session's shim when spilling starts. The key exists only in that shim's memory (and goes to its next program in an in-place update), never in a file or the Keychain. The chunk's start offset is the nonce (offsets never repeat in a session) and its associated data, so chunks can't be swapped around. Without the shim the files can't be read, so nothing outlives the session in a readable form.
+- **Writing:** the bytes the ring drops (on overflow, or when the daemon trims idle sessions for memory) are appended to an in-memory chunk; full chunks are encrypted and written by a background thread, so terminal output never waits on the disk. Past the limit, the oldest files are deleted.
+- **Reading:** `AttachMode::History` sends the spilled chunks (decrypted, oldest first, including those still in memory), then the whole in-memory buffer with no blocks cut, then live output.
+- **Lifetime:** removing a session, or its exit retention ending, deletes its folder. `swarmd spill off` stops spilling in every running session and deletes what they spilled. `on` starts it in running sessions too. When `swarmd` starts, it applies the setting and deletes folders of sessions that are gone (a crashed shim can't clean up, and its files are unreadable anyway). Shims from before this change don't support it; the daemon logs that and leaves them alone.
+
+**Checked.**
+- **Unit tests:**
+  - Spilled output reads back exactly, and the files contain none of it in the clear.
+  - The oldest chunks are dropped past the limit.
+  - A spill handed to a new shim program still reads and keeps writing.
+  - A chunk can't be read with another key.
+  - The ring returns exactly the bytes it drops.
+- **End-to-end tests** (macOS and Linux):
+  - 2.5 million numbered lines (about 21 MB) in a session come back complete and in order through `History`, before and after an in-place shim update.
+  - No run of the output is in the files in the clear.
+  - `spill off` deletes the files.
+  - Removing a session deletes its spill.
+- **In the app:**
+  - The switch turned spilling on for the session already running on a new shim.
+  - Another session printed 2.5 million lines (about 19 MB). Its buffer then started at byte 4,706,185, with the start in encrypted 1 MiB chunk files.
+  - `swarmctl dump` printed all 2,500,000 lines in order in under a second.
+  - Turning the switch off deleted the files.
 
 ## 4. Session model
 
@@ -648,7 +703,7 @@ How the reattach budget is met: not by tail-first rendering (Warp's block list c
 
 - Local socket in `$XDG_RUNTIME_DIR/swarm/` (macOS: `$TMPDIR/swarm-$UID/`), dir `0700`, socket `0600`; verify peer uid via `SO_PEERCRED` / `getpeereid` and reject mismatches.
 - No network listener by default. Remote access is only through ssh as the same user.
-- Ring buffers live in memory only; no scrollback on disk by default (secrets). Optional encrypted spill-to-disk later.
+- Ring buffers live in memory only; no scrollback on disk by default (secrets). Spill-to-disk is opt-in and encrypted with a key that never leaves the session's shim (see "Scrollback beyond 16 MB").
 - Env passed to new sessions is filtered (don't forward GUI-specific vars like `SSH_AUTH_SOCK` of the laptop to a remote host unless asked).
 
 ## 11. Tech choices (Rust)
