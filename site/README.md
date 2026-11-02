@@ -1,6 +1,6 @@
 # swarm-term.com
 
-The product site: Astro, static output, no client framework.
+The product site: Astro, static output, no client framework, served by Cloudflare.
 
 ```bash
 npm install
@@ -16,9 +16,9 @@ Everything is uploaded from this checkout with `wrangler`, so it works while the
 npx wrangler login
 ```
 
-**Site (Cloudflare Pages).** `scripts/deploy.sh` builds and uploads `dist/` to the Pages project `swarm-term` (created on the first run). `scripts/deploy.sh preview` gives a preview URL instead. Then add `swarm-term.com` and `www.swarm-term.com` under the project's Custom domains in the dashboard; the domain is already on Cloudflare, so the records are created for you.
+**Site (Cloudflare Workers static assets).** `scripts/deploy.sh` builds and uploads `dist/` to the Worker `swarm-term` (`wrangler.jsonc`: static files only, no server code; unknown paths get `404.html`). It's live at `swarm-term.artur-borycki.workers.dev`; `scripts/deploy.sh preview` uploads a version with its own preview URL and leaves the live site alone. To serve it at `swarm-term.com`, add `"routes": [{ "pattern": "swarm-term.com", "custom_domain": true }, { "pattern": "www.swarm-term.com", "custom_domain": true }]` to `wrangler.jsonc` and deploy; the domain is already on Cloudflare, so the DNS records are created for you.
 
-**Downloads (Cloudflare R2).** The DMG is too big for Pages (25 MiB per file), so it lives in the R2 bucket `swarm-downloads`, served at `downloads.swarm-term.com`. R2 doesn't charge for downloads.
+**Downloads (Cloudflare R2).** The DMG is too big for static assets (25 MiB per file), so it lives in the R2 bucket `swarm-downloads`, served at `downloads.swarm-term.com`. R2 doesn't charge for downloads.
 
 ```bash
 npx wrangler r2 bucket create swarm-downloads
