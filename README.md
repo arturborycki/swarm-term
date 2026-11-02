@@ -21,7 +21,8 @@ universal build for Apple silicon and Intel. Download the DMG from
   kept on disk, encrypted.
 
 The 0.1 DMG is not notarized yet, so Gatekeeper blocks the first launch.
-Right-click Swarm.app and choose Open.
+To allow it, open System Settings → Privacy & Security, scroll down and
+click Open Anyway.
 
 | Crate | What it is |
 |---|---|
