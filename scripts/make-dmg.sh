@@ -41,13 +41,17 @@ if [ -n "${SWARM_NOTARY_PROFILE:-}" ] && [ -z "${SWARM_SIGN_IDENTITY:-}" ]; then
 fi
 
 if [ -n "${SWARM_SIGN_IDENTITY:-}" ]; then
-    # Inner binaries first, then the app, with a secure timestamp.
-    for bin in "$APP"/Contents/MacOS/*; do
-        codesign --force --options runtime --timestamp --sign "$SWARM_SIGN_IDENTITY" "$bin"
+    # Inner binaries first, then the app, with a secure timestamp. Replacing
+    # bundle-app.sh's signature also drops its debug entitlements
+    # (get-task-allow), which notarization rejects.
+    ENTITLEMENTS="$ROOT/scripts/Swarm.entitlements"
+    for bin in swarmd swarm-shim swarmctl; do
+        args=(--force --options runtime --timestamp --sign "$SWARM_SIGN_IDENTITY")
+        [ "$bin" = swarmctl ] || args+=(--entitlements "$ENTITLEMENTS")
+        codesign "${args[@]}" "$APP/Contents/MacOS/$bin"
     done
     codesign --force --options runtime --timestamp --sign "$SWARM_SIGN_IDENTITY" \
-        --entitlements "$ROOT/app/script/Entitlements.plist" "$APP" 2>/dev/null ||
-        codesign --force --options runtime --timestamp --sign "$SWARM_SIGN_IDENTITY" "$APP"
+        --entitlements "$ENTITLEMENTS" "$APP"
     codesign --verify --deep --strict "$APP"
 else
     echo "note: SWARM_SIGN_IDENTITY not set; the DMG holds an ad-hoc-signed app" >&2
@@ -64,8 +68,18 @@ if [ -n "${SWARM_SIGN_IDENTITY:-}" ]; then
     codesign --force --timestamp --sign "$SWARM_SIGN_IDENTITY" "$DMG"
 fi
 if [ -n "${SWARM_NOTARY_PROFILE:-}" ]; then
-    xcrun notarytool submit "$DMG" --keychain-profile "$SWARM_NOTARY_PROFILE" --wait
+    # notarytool exits 0 even when Apple rejects the DMG, so read the status.
+    RESULT="$(xcrun notarytool submit "$DMG" --keychain-profile "$SWARM_NOTARY_PROFILE" --wait --output-format plist)"
+    STATUS="$(/usr/libexec/PlistBuddy -c 'Print :status' /dev/stdin <<<"$RESULT")"
+    if [ "$STATUS" != Accepted ]; then
+        ID="$(/usr/libexec/PlistBuddy -c 'Print :id' /dev/stdin <<<"$RESULT")"
+        echo "notarization: $STATUS. Apple's log:" >&2
+        xcrun notarytool log "$ID" --keychain-profile "$SWARM_NOTARY_PROFILE" >&2 || true
+        exit 1
+    fi
     xcrun stapler staple "$DMG"
+    # What Gatekeeper decides for a downloaded copy.
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 else
     echo "note: SWARM_NOTARY_PROFILE not set; the DMG isn't notarized" >&2
 fi
