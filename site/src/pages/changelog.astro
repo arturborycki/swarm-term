@@ -1,6 +1,6 @@
 ---
 import Base from '../layouts/Base.astro';
-import { RELEASE } from '../site';
+import { RELEASE, REPO_PUBLIC } from '../site';
 
 const releases = [
   {
@@ -26,7 +26,7 @@ const releases = [
     {releases.map((r) => (
       <section class="release">
         <div class="meta">
-          <a class="version" href={r.href}>v{r.version}</a>
+          {REPO_PUBLIC ? <a class="version" href={r.href}>v{r.version}</a> : <span class="version">v{r.version}</span>}
           <time datetime={r.date}>{r.date}</time>
         </div>
         <ul>

@@ -5,7 +5,8 @@ import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/500.css';
 import '../styles/global.css';
 import Hive from '../components/Hive.astro';
-import { DMG, REPO, VERSION } from '../site';
+import RepoLink from '../components/RepoLink.astro';
+import { DMG, VERSION } from '../site';
 
 interface Props {
   title: string;
@@ -16,7 +17,6 @@ const path = Astro.url.pathname;
 const nav = [
   { href: '/docs/', label: 'docs' },
   { href: '/changelog/', label: 'changelog' },
-  { href: REPO, label: 'github' },
 ];
 ---
 
@@ -50,6 +50,7 @@ const nav = [
           {nav.map((item) => (
             <a href={item.href} class:list={['navlink', { here: path.startsWith(item.href) }]}>{item.label}</a>
           ))}
+          <RepoLink class="navlink">github</RepoLink>
           <a class="btn primary small" href={DMG}>Download</a>
         </nav>
       </div>
@@ -73,13 +74,13 @@ const nav = [
         </div>
         <div>
           <p class="head">project</p>
-          <a href={REPO}>github</a>
-          <a href={`${REPO}/blob/main/docs/DESIGN.md`}>design</a>
-          <a href={`${REPO}/blob/main/docs/DESIGN.md#10-security`}>security</a>
+          <RepoLink>github</RepoLink>
+          <RepoLink path="/blob/main/docs/DESIGN.md">design</RepoLink>
+          <RepoLink path="/blob/main/docs/DESIGN.md#10-security">security</RepoLink>
         </div>
         <div>
           <p class="head">help</p>
-          <a href={`${REPO}/issues`}>issues</a>
+          <RepoLink path="/issues">issues</RepoLink>
           <a href="/docs/#troubleshooting">troubleshooting</a>
         </div>
       </div>
@@ -142,15 +143,15 @@ const nav = [
     gap: 22px;
   }
 
-  .navlink {
+  nav :global(.navlink) {
     font-family: var(--mono);
     font-size: 13px;
     text-decoration: none;
     color: var(--ink-2);
   }
 
-  .navlink:hover,
-  .navlink.here {
+  nav a.navlink:hover,
+  nav a.navlink.here {
     color: var(--ink);
   }
 
@@ -163,8 +164,8 @@ const nav = [
     nav {
       gap: 14px;
     }
-    .navlink:nth-child(2),
-    .navlink:nth-child(3) {
+    nav :global(.navlink:nth-child(2)),
+    nav :global(.navlink:nth-child(3)) {
       display: none;
     }
   }
@@ -220,7 +221,8 @@ const nav = [
     }
   }
 
-  .cols a {
+  .cols a,
+  .cols :global(.repo-soon) {
     display: block;
     color: var(--ink-2);
     text-decoration: none;

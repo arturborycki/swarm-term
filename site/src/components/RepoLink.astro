@@ -1,0 +1,26 @@
+---
+import { REPO, REPO_PUBLIC } from '../site';
+
+interface Props {
+  /** Path inside the repository, e.g. "/issues". */
+  path?: string;
+  class?: string;
+}
+const { path = '', class: className } = Astro.props;
+---
+
+{REPO_PUBLIC ? (
+  <a href={`${REPO}${path}`} class={className}><slot /></a>
+) : (
+  <span class:list={[className, 'repo-soon']} aria-disabled="true" title="Coming soon: the repository isn't public yet">
+    <slot />
+  </span>
+)}
+
+<style>
+  .repo-soon {
+    color: var(--ink-3);
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+</style>
