@@ -1,0 +1,260 @@
+---
+import Base from '../layouts/Base.astro';
+import { DMG, VERSION } from '../site';
+
+const toc = [
+  ['install', 'Install'],
+  ['sessions', 'Sessions and tabs'],
+  ['remote', 'Remote hosts'],
+  ['scrollback', 'Scrollback'],
+  ['swarmctl', 'swarmctl'],
+  ['daemon', 'The daemon'],
+  ['troubleshooting', 'Troubleshooting'],
+];
+---
+
+<Base title="Docs — Swarm" description="Install Swarm, work with persistent sessions on your Mac and on servers, and script them with swarmctl.">
+  <div class="frame docs">
+    <aside>
+      <p class="label"># docs <span class="dim">[ {VERSION} ]</span></p>
+      <nav aria-label="Docs">
+        {toc.map(([id, title]) => <a href={`#${id}`}>{title}</a>)}
+      </nav>
+    </aside>
+
+    <article class="prose">
+      <h1>Swarm docs</h1>
+      <p class="lede">Everything you need to run Swarm: the app, its daemon, and the command line.</p>
+
+      <h2 id="install">Install</h2>
+      <ol>
+        <li><a href={DMG}>Download Swarm-{VERSION}.dmg</a>. It's a universal app for Apple silicon and Intel and needs macOS 13 Ventura or later.</li>
+        <li>Open the DMG and drag <strong>Swarm.app</strong> to Applications.</li>
+        <li>
+          This early build isn't notarized yet, so macOS blocks the first launch. Open System Settings → Privacy &amp;
+          Security, scroll down and click <strong>Open Anyway</strong>.
+        </li>
+      </ol>
+      <p>To use <code>swarmctl</code> from any terminal, link it onto your <code>PATH</code>:</p>
+      <pre class="term">ln -s /Applications/Swarm.app/Contents/MacOS/swarmctl /usr/local/bin/swarmctl</pre>
+
+      <h2 id="sessions">Sessions and tabs</h2>
+      <p>
+        Every tab is a <em>session</em>: a shell owned by Swarm's daemon, <code>swarmd</code>, not by the window.
+        Closing a tab detaches it; the session keeps running and waits in the sidebar's <strong>detached</strong> list
+        until you reopen it. To end a session for good, choose <strong>Terminate</strong> from its menu, or run
+        <code>swarmctl rm</code>.
+      </p>
+      <ul>
+        <li>Quitting the app leaves every session running. When it starts again, it reopens the tabs you had open.</li>
+        <li>Reopened tabs show their earlier output, including blocks, exit codes and durations.</li>
+        <li>Splitting a pane starts a new session, so each pane can be detached and reattached on its own.</li>
+      </ul>
+
+      <h2 id="remote">Remote hosts</h2>
+      <p>
+        Click <strong>Connect…</strong> in the sidebar and pick a host from your <code>~/.ssh/config</code>, or type
+        <code>user@host[:port]</code>. Swarm connects with your own ssh setup (keys, agent, jump hosts) and installs
+        <code>swarmd</code> on the host if it isn't there. Hosts can run Linux or macOS.
+      </p>
+      <p>
+        Remote sessions live on the host. If your laptop sleeps or the network drops, the tabs show that they're
+        reconnecting and pick up where they were.
+      </p>
+
+      <h2 id="scrollback">Scrollback</h2>
+      <p>
+        Each session keeps its last 16 MB of output in memory, and all sessions together are capped at 512 MB; the
+        idlest sessions are trimmed first. Nothing is written to disk by default.
+      </p>
+      <p>
+        To keep more, turn on <strong>Settings → Daemon → Keep scrollback beyond 16 MB on disk</strong>, or run
+        <code>swarmd spill on</code>. Output that leaves memory is then saved encrypted, up to 256 MB per session by
+        default (<code>--limit-mb N</code> changes it). The key exists only in that session's process, and the files are
+        deleted when the session ends or the setting is turned off.
+      </p>
+      <pre class="term"><span class="p">$</span> swarmctl dump build &gt; build.log      <span class="d"># all kept output, as text</span>
+<span class="p">$</span> swarmctl dump build --raw            <span class="d"># with escape codes</span></pre>
+
+      <h2 id="swarmctl">swarmctl</h2>
+      <p>
+        The command-line client sees the same sessions as the app. Add <code>--host &lt;ssh-host&gt;</code> to any command
+        to talk to that host's daemon instead.
+      </p>
+      <table>
+        <tbody>
+          <tr><td><code>swarmctl ls</code></td><td>List sessions with their state, folder and last activity.</td></tr>
+          <tr><td><code>swarmctl new -n build</code></td><td>Create a session and attach to it (<code>-d</code> to leave it detached).</td></tr>
+          <tr><td><code>swarmctl attach build</code></td><td>Attach by id, id prefix or name. Ctrl-\ detaches.</td></tr>
+          <tr><td><code>swarmctl rename build ci</code></td><td>Rename a session; the app follows live.</td></tr>
+          <tr><td><code>swarmctl dump build</code></td><td>Print everything the session has kept.</td></tr>
+          <tr><td><code>swarmctl info build</code></td><td>Show everything known about a session.</td></tr>
+          <tr><td><code>swarmctl kill build</code></td><td>Send a signal to the session's process (HUP by default).</td></tr>
+          <tr><td><code>swarmctl rm build</code></td><td>End the session if needed and drop it.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="daemon">The daemon</h2>
+      <p>
+        <code>swarmd</code> starts with the app by default. To have sessions survive logout and start the daemon at
+        login instead (a launchd agent on macOS, a systemd user unit on Linux):
+      </p>
+      <pre class="term"><span class="p">$</span> swarmctl daemon install-service</pre>
+      <p>
+        <code>swarmctl daemon uninstall-service</code> goes back to starting on demand. <code>swarmctl daemon stop</code>
+        stops the daemon without ending any session. When a new version starts, running sessions move to it in place;
+        <code>swarmctl daemon upgrade-shims</code> does that by hand.
+      </p>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+      <dl>
+        <dt>macOS says Swarm can't be opened</dt>
+        <dd>Allow it once in System Settings → Privacy &amp; Security → Open Anyway. Notarized builds are coming.</dd>
+        <dt>A remote tab keeps reconnecting</dt>
+        <dd>Check that <code>ssh &lt;host&gt;</code> works without a password prompt from a terminal; Swarm uses the same configuration.</dd>
+        <dt>A session I closed is gone from the tabs</dt>
+        <dd>It's detached, not ended. Open it from the <strong>detached</strong> list in the sidebar, or run <code>swarmctl ls</code>.</dd>
+      </dl>
+    </article>
+  </div>
+</Base>
+
+<style>
+  .docs {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 56px;
+    padding-top: 64px;
+    padding-bottom: 96px;
+  }
+
+  aside {
+    position: sticky;
+    top: 92px;
+    align-self: start;
+    display: grid;
+    gap: 16px;
+  }
+
+  aside nav {
+    display: grid;
+    gap: 2px;
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+
+  aside nav a {
+    color: var(--ink-2);
+    text-decoration: none;
+    padding: 4px 0;
+  }
+
+  aside nav a:hover {
+    color: var(--ink);
+  }
+
+  @media (max-width: 799px) {
+    .docs {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 24px;
+      padding-top: 40px;
+    }
+    aside {
+      position: static;
+    }
+    aside nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 16px;
+    }
+  }
+
+  .prose {
+    max-width: 720px;
+  }
+
+  .prose h1 {
+    margin-bottom: 12px;
+  }
+
+  .prose h2 {
+    font-size: 26px;
+    margin: 56px 0 16px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    scroll-margin-top: 80px;
+  }
+
+  .prose p,
+  .prose li,
+  .prose dd {
+    color: var(--ink-2);
+  }
+
+  .prose strong,
+  .prose dt {
+    color: var(--ink);
+    font-weight: 500;
+  }
+
+  .prose code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--accent-soft);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  .prose pre.term {
+    margin: 16px 0;
+  }
+
+  .prose pre code {
+    background: none;
+    padding: 0;
+  }
+
+  .prose a {
+    color: var(--accent);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 15px;
+    margin: 16px 0;
+  }
+
+  td {
+    border-top: 1px solid var(--line);
+    padding: 10px 12px 10px 0;
+    vertical-align: top;
+    color: var(--ink-2);
+  }
+
+  td:first-child {
+    white-space: nowrap;
+    width: 1%;
+  }
+
+  @media (max-width: 599px) {
+    td {
+      display: block;
+      padding: 4px 0;
+      border-top: 0;
+    }
+    tr {
+      display: block;
+      border-top: 1px solid var(--line);
+      padding: 8px 0;
+    }
+  }
+
+  dt {
+    margin-top: 16px;
+  }
+
+  dd {
+    margin: 4px 0 0;
+  }
+</style>
