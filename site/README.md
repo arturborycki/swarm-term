@@ -23,10 +23,11 @@ npx wrangler login
 ```bash
 npx wrangler r2 bucket create swarm-downloads
 npx wrangler r2 bucket domain add swarm-downloads --domain downloads.swarm-term.com --zone-id <swarm-term.com zone id>
+scripts/sign-update.sh             # signs dist/Swarm-<version>.dmg, records it in src/site.ts
 scripts/upload-release.sh          # uploads dist/Swarm-<version>.dmg from the repo root
 ```
 
-**Updates.** `/releases/latest.json` describes the current release in the same shape as GitHub's API, for the app's "Check for Updates…".
+**Updates.** `/releases/latest.json` describes the current release in the same shape as GitHub's API, for the app's "Check for Updates…", plus the DMG's `sha256` and Ed25519 `signature` (`DMG_SHA256`, `DMG_SIGNATURE` in `src/site.ts`, written by `scripts/sign-update.sh`). The app installs an update itself only when that signature verifies with the release key built into it, so sign every release before deploying the site. The private key is `~/.config/swarm-term/update-signing-key.pem` on the release Mac; keep a backup.
 
 **Going public later.** Set `REPO_PUBLIC = true` in `src/site.ts` to turn the grayed-out GitHub links back on.
 
