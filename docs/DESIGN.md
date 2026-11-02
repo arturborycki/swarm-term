@@ -311,7 +311,7 @@ Verified in the bundled app: launch → run a command → quit → the session k
 
 ### Swarm identity and UI build plan (2026-10-30)
 
-**Done:** the fork has its own `swarm` binary (`app/src/bin/swarm.rs`, Warp's OSS channel underneath) bundled as **Swarm.app**: bundle id `dev.swarm.Swarm`, URL scheme `swarm`, log `~/Library/Logs/swarm.log`, its own data dirs, and the Swarm icon (drawn by `scripts/make-icon.swift`). The app menu and "Set Swarm as Default Terminal" use `swarm::APP_NAME`. `scripts/bundle-app.sh` builds Swarm.app with `swarmd`, `swarm-shim` and `swarmctl` inside. `warp-oss` stays untouched.
+**Done:** the fork has its own `swarm` binary (`app/src/bin/swarm.rs`, Warp's OSS channel underneath) bundled as **Swarm.app**: bundle id `dev.swarm.Swarm`, URL scheme `swarm`, log `~/Library/Logs/swarm.log`, its own data dirs, and the Swarm icon (drawn by `scripts/make-icon.swift`: the "Hive", a cluster of session cells around a prompt cell, and a matching one-cell template for the menu bar extra). The app menu and "Set Swarm as Default Terminal" use `swarm::APP_NAME`. `scripts/bundle-app.sh` builds Swarm.app with `swarmd`, `swarm-shim` and `swarmctl` inside. `warp-oss` stays untouched.
 
 **Next: replace Warp's interface with the mocked one, piece by piece.** Each row names the Warp view it replaces:
 
