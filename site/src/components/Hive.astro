@@ -1,0 +1,21 @@
+---
+// The Swarm mark: session cells around the prompt cell (scripts/make-icon.swift draws the app icon).
+interface Props {
+  size?: number;
+}
+const { size = 28 } = Astro.props;
+const hex = '102,59 0,118 -102,59 -102,-59 0,-118 102,-59';
+---
+
+<svg width={size} height={size} viewBox="170 170 684 684" aria-hidden="true">
+  <g transform="translate(512 512)">
+    <polygon transform="translate(-225 0)" points={hex} fill="none" stroke="currentColor" stroke-opacity="0.45" stroke-width="20" />
+    <polygon transform="translate(225 0)" points={hex} fill="currentColor" fill-opacity="0.35" />
+    <polygon transform="translate(-112 -195)" points={hex} fill="currentColor" fill-opacity="0.35" />
+    <polygon transform="translate(112 -195)" points={hex} fill="none" stroke="currentColor" stroke-opacity="0.45" stroke-width="20" />
+    <polygon transform="translate(-112 195)" points={hex} fill="currentColor" fill-opacity="0.6" />
+    <polygon transform="translate(112 195)" points={hex} fill="none" stroke="currentColor" stroke-opacity="0.45" stroke-width="20" />
+    <polygon points={hex} fill="var(--accent)" />
+    <polyline points="-34,-46 22,0 -34,46" fill="none" stroke="var(--bg)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round" />
+  </g>
+</svg>

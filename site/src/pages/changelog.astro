@@ -1,0 +1,90 @@
+---
+import Base from '../layouts/Base.astro';
+import { RELEASE } from '../site';
+
+const releases = [
+  {
+    version: '0.1.0',
+    date: '2026-11-01',
+    href: RELEASE,
+    items: [
+      'Persistent sessions: tabs keep running when you close the window, quit the app or restart the daemon, and reopen with their output and blocks.',
+      'Remote hosts over your own ssh setup, Linux or macOS. Swarm installs its daemon there and reconnects after sleep and network drops.',
+      'The app: a session sidebar, one panel per session, split panes, a Swarm theme and system fonts, built on Warp’s open-source engine.',
+      'In-place updates: running sessions move to a new version of their session process without restarting.',
+      'Scrollback: 16 MB per session in memory, with optional encrypted spill to disk (swarmd spill on).',
+      'swarmctl: ls, new, attach, rename, info, dump, kill and rm, locally or with --host.',
+    ],
+  },
+];
+---
+
+<Base title="Changelog — Swarm" description="What's new in each Swarm release.">
+  <div class="frame page">
+    <p class="label"># changelog</p>
+    <h1>What's new</h1>
+    {releases.map((r) => (
+      <section class="release">
+        <div class="meta">
+          <a class="version" href={r.href}>v{r.version}</a>
+          <time datetime={r.date}>{r.date}</time>
+        </div>
+        <ul>
+          {r.items.map((item) => <li>{item}</li>)}
+        </ul>
+      </section>
+    ))}
+  </div>
+</Base>
+
+<style>
+  .page {
+    padding-top: 64px;
+    padding-bottom: 96px;
+    display: grid;
+    gap: 20px;
+  }
+
+  .release {
+    margin-top: 32px;
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    gap: 32px;
+    border-top: 1px solid var(--line);
+    padding-top: 32px;
+  }
+
+  @media (max-width: 699px) {
+    .release {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 12px;
+    }
+  }
+
+  .meta {
+    display: grid;
+    gap: 4px;
+    font-family: var(--mono);
+    align-content: start;
+  }
+
+  .version {
+    font-size: 22px;
+    font-weight: 500;
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  time {
+    font-size: 13px;
+    color: var(--ink-3);
+  }
+
+  ul {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--ink-2);
+    display: grid;
+    gap: 10px;
+  }
+</style>

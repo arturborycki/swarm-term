@@ -1,0 +1,256 @@
+---
+import '@fontsource/inter/400.css';
+import '@fontsource/inter/500.css';
+import '@fontsource/jetbrains-mono/400.css';
+import '@fontsource/jetbrains-mono/500.css';
+import '../styles/global.css';
+import Hive from '../components/Hive.astro';
+import { DMG, REPO, VERSION } from '../site';
+
+interface Props {
+  title: string;
+  description: string;
+}
+const { title, description } = Astro.props;
+const path = Astro.url.pathname;
+const nav = [
+  { href: '/docs/', label: 'docs' },
+  { href: '/changelog/', label: 'changelog' },
+  { href: REPO, label: 'github' },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:image" content={new URL('/og.png', Astro.site ?? 'https://swarm-term.com')} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#101217" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f5f5f1" media="(prefers-color-scheme: light)" />
+  </head>
+  <body>
+    <div class="margin-label left" aria-hidden="true">swarm · terminal · {VERSION}</div>
+    <div class="margin-label right" aria-hidden="true">sessions · that · outlive · windows</div>
+
+    <header class="top">
+      <div class="frame bar">
+        <a href="/" class="brand" aria-label="Swarm home">
+          <Hive size={26} />
+          <span>swarm</span>
+        </a>
+        <nav aria-label="Main">
+          {nav.map((item) => (
+            <a href={item.href} class:list={['navlink', { here: path.startsWith(item.href) }]}>{item.label}</a>
+          ))}
+          <a class="btn primary small" href={DMG}>Download</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <slot />
+    </main>
+
+    <footer class="foot">
+      <div class="frame cols">
+        <div class="brandcol">
+          <a href="/" class="brand" aria-label="Swarm home"><Hive size={30} /><span>swarm</span></a>
+          <p>A terminal whose tabs are sessions that keep running, on your Mac or on a server.</p>
+        </div>
+        <div>
+          <p class="head">product</p>
+          <a href={DMG}>download</a>
+          <a href="/docs/">docs</a>
+          <a href="/changelog/">changelog</a>
+        </div>
+        <div>
+          <p class="head">project</p>
+          <a href={REPO}>github</a>
+          <a href={`${REPO}/blob/main/docs/DESIGN.md`}>design</a>
+          <a href={`${REPO}/blob/main/docs/DESIGN.md#10-security`}>security</a>
+        </div>
+        <div>
+          <p class="head">help</p>
+          <a href={`${REPO}/issues`}>issues</a>
+          <a href="/docs/#troubleshooting">troubleshooting</a>
+        </div>
+      </div>
+      <div class="frame legal">
+        <span>© 2026 swarm-term</span>
+        <span>app: AGPL-3.0 · daemon: MIT or Apache-2.0</span>
+      </div>
+    </footer>
+
+    <script>
+      document.querySelectorAll<HTMLButtonElement>('button[data-copy]').forEach((button) => {
+        button.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(button.dataset.copy ?? '');
+            const label = button.textContent;
+            button.textContent = 'copied';
+            setTimeout(() => (button.textContent = label), 1400);
+          } catch {
+            // Clipboard access can be refused; the command stays selectable.
+          }
+        });
+      });
+    </script>
+  </body>
+</html>
+
+<style>
+  .top {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 60px;
+    gap: 16px;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 17px;
+    letter-spacing: -0.02em;
+    text-decoration: none;
+    color: var(--ink);
+  }
+
+  nav {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+  }
+
+  .navlink {
+    font-family: var(--mono);
+    font-size: 13px;
+    text-decoration: none;
+    color: var(--ink-2);
+  }
+
+  .navlink:hover,
+  .navlink.here {
+    color: var(--ink);
+  }
+
+  .btn.small {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  @media (max-width: 560px) {
+    nav {
+      gap: 14px;
+    }
+    .navlink:nth-child(2),
+    .navlink:nth-child(3) {
+      display: none;
+    }
+  }
+
+  .margin-label {
+    position: fixed;
+    top: 50%;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    white-space: nowrap;
+    z-index: 0;
+    pointer-events: none;
+  }
+
+  .margin-label.left {
+    left: calc(50% - var(--frame) / 2 - 22px);
+    transform: translate(-50%, -50%) rotate(-90deg);
+  }
+
+  .margin-label.right {
+    left: calc(50% + var(--frame) / 2 + 22px);
+    transform: translate(-50%, -50%) rotate(90deg);
+  }
+
+  @media (max-width: 1300px) {
+    .margin-label {
+      display: none;
+    }
+  }
+
+  .foot {
+    border-top: 1px solid var(--line);
+    padding: 56px 0 28px;
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+
+  .cols {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 1fr;
+    gap: 32px;
+  }
+
+  @media (max-width: 719px) {
+    .cols {
+      grid-template-columns: 1fr 1fr;
+    }
+    .brandcol {
+      grid-column: 1 / -1;
+    }
+  }
+
+  .cols a {
+    display: block;
+    color: var(--ink-2);
+    text-decoration: none;
+    padding: 3px 0;
+    overflow-wrap: anywhere;
+  }
+
+  .cols a:hover {
+    color: var(--ink);
+  }
+
+  .brandcol p {
+    color: var(--ink-2);
+    max-width: 300px;
+    font-family: var(--sans);
+    font-size: 14px;
+  }
+
+  .head {
+    color: var(--ink-3);
+    margin: 0 0 8px;
+  }
+
+  .legal {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 48px;
+    color: var(--ink-3);
+    font-size: 12px;
+  }
+</style>
