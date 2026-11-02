@@ -5,6 +5,7 @@ mod registry;
 mod restore;
 mod server;
 mod service;
+mod spill;
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
@@ -53,6 +54,26 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RestoreCmd,
     },
+    /// Keep output beyond each session's 16 MB in-memory buffer on disk,
+    /// encrypted with a key only the session holds (`swarmctl dump` shows it).
+    Spill {
+        #[command(subcommand)]
+        cmd: SpillCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpillCmd {
+    /// Turn it on, for running sessions too.
+    On {
+        /// Most kept on disk per session, in MB (default 256).
+        #[arg(long)]
+        limit_mb: Option<u64>,
+    },
+    /// Turn it off and delete what was spilled.
+    Off,
+    /// Show whether it's on.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -91,6 +112,17 @@ fn main() {
             ServiceCmd::Install { no_linger } => service::install(!no_linger),
             ServiceCmd::Uninstall => service::uninstall(),
             ServiceCmd::Status => service::status(),
+        },
+        Cmd::Spill { cmd } => match cmd {
+            SpillCmd::On { limit_mb } => {
+                let limit = limit_mb.map(|mb| mb.max(1) * 1024 * 1024).unwrap_or(spill::DEFAULT_LIMIT);
+                spill::set(Some(limit)).and_then(|_| block_on(apply_spill()))
+            }
+            SpillCmd::Off => spill::set(None).and_then(|_| block_on(apply_spill())),
+            SpillCmd::Status => {
+                println!("{}", spill::status_line());
+                Ok(())
+            }
         },
         Cmd::Restore { cmd } => match cmd {
             RestoreCmd::On => restore::set_enabled(true),
@@ -160,6 +192,10 @@ fn run(if_not_running: bool) -> Result<()> {
         let upgrading = registry.clone();
         tokio::spawn(async move {
             upgrading.upgrade_shims(false).await;
+            // The spill setting may have changed while the daemon was down.
+            upgrading.apply_spill().await;
+            let live: Vec<String> = upgrading.list().into_iter().map(|s| s.id).collect();
+            spill::remove_orphans(&live);
         });
         restore::start(&registry).await;
         tokio::spawn(memory::run(registry.clone()));
@@ -240,6 +276,16 @@ async fn start() -> Result<bool> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     bail!("swarmd did not start within 5s")
+}
+
+/// Tells a running daemon to apply the spill setting to its sessions.
+async fn apply_spill() -> Result<()> {
+    let Ok(mut s) = connect().await else { return Ok(()) };
+    write_frame(&mut s, &ClientMsg::Request { id: 1, req: Request::ApplySpill }).await?;
+    match read_frame::<_, ServerMsg>(&mut s).await? {
+        Some(ServerMsg::Response { result: Err(e), .. }) => bail!(e),
+        _ => Ok(()),
+    }
 }
 
 async fn stop() -> Result<()> {

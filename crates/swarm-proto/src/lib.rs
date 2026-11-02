@@ -120,6 +120,18 @@ pub enum AttachMode {
     ResumeFrom(u64),
     /// Live output only.
     Live,
+    /// Everything still kept, oldest first: output spilled to disk, then the
+    /// whole in-memory buffer (no trimming of long blocks), then live output.
+    History,
+}
+
+/// Spill-to-disk: output that leaves a session's in-memory buffer is kept in
+/// `dir/<session id>/`, encrypted with a key only the session's shim holds,
+/// up to `limit` bytes (oldest dropped first).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SpillConfig {
+    pub dir: String,
+    pub limit: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -150,6 +162,8 @@ pub enum Request {
     /// Moves running sessions to this daemon's `swarm-shim` without
     /// restarting them; `force` also redoes shims already on this build.
     UpgradeShims { force: bool },
+    /// Re-read the spill-to-disk setting and apply it to running sessions.
+    ApplySpill,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -238,6 +252,10 @@ pub enum ShimRequest {
     /// process, PTY, child and scrollback). Answered `Ok` once `exe` has
     /// agreed to take the session over, just before the switch.
     Upgrade { exe: String },
+    // New variants go last: older shims decode requests by position.
+    /// Start (`Some`) or stop spilling output that leaves the in-memory
+    /// buffer to disk. Stopping deletes what was spilled.
+    SetSpill(Option<SpillConfig>),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -281,4 +299,30 @@ pub fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// postcard writes an enum variant as its position: older shims, daemons
+    /// and apps decode by it, so a variant must never move. Add new ones last.
+    #[test]
+    fn variants_keep_their_positions() {
+        let tag = |bytes: Vec<u8>| bytes[0];
+        assert_eq!(tag(postcard::to_stdvec(&ShimRequest::Trim { keep: 0 }).unwrap()), 6);
+        assert_eq!(tag(postcard::to_stdvec(&ShimRequest::Version).unwrap()), 7);
+        assert_eq!(tag(postcard::to_stdvec(&ShimRequest::Upgrade { exe: String::new() }).unwrap()), 8);
+        assert_eq!(tag(postcard::to_stdvec(&ShimRequest::SetSpill(None)).unwrap()), 9);
+        assert_eq!(tag(postcard::to_stdvec(&Request::Shutdown).unwrap()), 8);
+        assert_eq!(tag(postcard::to_stdvec(&Request::UpgradeShims { force: false }).unwrap()), 9);
+        assert_eq!(tag(postcard::to_stdvec(&Request::ApplySpill).unwrap()), 10);
+        assert_eq!(tag(postcard::to_stdvec(&AttachMode::Live).unwrap()), 2);
+        assert_eq!(tag(postcard::to_stdvec(&AttachMode::History).unwrap()), 3);
+        assert_eq!(tag(postcard::to_stdvec(&ShimMsg::Lagged { resume_at: 0 }).unwrap()), 7);
+        assert_eq!(
+            tag(postcard::to_stdvec(&ShimMsg::Version { build_id: String::new(), handoff: 0, generation: 0 }).unwrap()),
+            8
+        );
+    }
 }

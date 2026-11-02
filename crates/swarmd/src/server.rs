@@ -174,6 +174,10 @@ impl Server {
                 Response::Ok
             }
             Request::UpgradeShims { force } => Response::ShimsUpgraded(r.upgrade_shims(force).await),
+            Request::ApplySpill => {
+                r.apply_spill().await;
+                Response::Ok
+            }
             Request::Attach { .. } | Request::Subscribe => unreachable!("handled by the connection loop"),
         })
     }

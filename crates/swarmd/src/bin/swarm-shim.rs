@@ -6,7 +6,7 @@ fn main() {
     // take over a session from it?
     if args.first().map(String::as_str) == Some("--accepts-handoff") {
         let version = args.get(1).and_then(|v| v.parse::<u32>().ok());
-        std::process::exit(if version == Some(swarm_shim::handoff::HANDOFF_VERSION) { 0 } else { 1 });
+        std::process::exit(if version.is_some_and(swarm_shim::handoff::accepts) { 0 } else { 1 });
     }
     swarm_proto::paths::close_inherited_fds_except(&swarm_shim::handed_over_fds(&args));
     tracing_subscriber::fmt()

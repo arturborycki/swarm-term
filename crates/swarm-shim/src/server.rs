@@ -67,6 +67,13 @@ async fn handle(
             session.trim(keep as usize);
             write_frame(&mut wr, &ShimMsg::Ok).await
         }
+        ShimRequest::SetSpill(cfg) => {
+            let reply = match session.set_spill(cfg) {
+                Ok(()) => ShimMsg::Ok,
+                Err(e) => ShimMsg::Err(format!("{e:#}")),
+            };
+            write_frame(&mut wr, &reply).await
+        }
         ShimRequest::Version => {
             let reply = ShimMsg::Version {
                 build_id: swarm_proto::BUILD_ID.to_string(),
@@ -77,6 +84,9 @@ async fn handle(
         }
         ShimRequest::Upgrade { exe } => {
             let exe = std::path::PathBuf::from(exe);
+            if !exe.is_absolute() {
+                return write_frame(&mut wr, &ShimMsg::Err(format!("not a program path: {exe:?}"))).await;
+            }
             if !session.is_running() {
                 return write_frame(&mut wr, &ShimMsg::Err("the session has exited".into())).await;
             }
@@ -127,6 +137,16 @@ async fn handle(
                     &ShimMsg::Attached { info: att.info.clone(), replay_from: att.replay_from, live_from: att.live_from },
                 )
                 .await?;
+                // `History`: what was spilled to disk comes first, a chunk at a time.
+                if let Some((spill, until)) = att.spill.take() {
+                    for piece in spill.pieces(until) {
+                        let s = spill.clone();
+                        let read = tokio::task::spawn_blocking(move || s.read(&piece, until)).await;
+                        if let Ok(Some((offset, bytes))) = read {
+                            send_replay(&mut wr, offset, &bytes).await?;
+                        }
+                    }
+                }
                 for (offset, bytes) in std::mem::take(&mut att.prelude) {
                     write_frame(&mut wr, &ShimMsg::Output { offset, data: bytes, replay: true }).await?;
                 }

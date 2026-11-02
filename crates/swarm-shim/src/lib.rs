@@ -6,6 +6,7 @@ pub mod handoff;
 mod scan;
 mod server;
 mod session;
+pub mod spill;
 
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use swarm_proto::{paths, CreateOpts, SessionState};
+use swarm_proto::{paths, CreateOpts, SessionState, SpillConfig};
 use tokio::net::UnixListener;
 use tokio::sync::Notify;
 
@@ -30,6 +31,8 @@ pub struct ShimConfig {
     pub scrollback: usize,
     /// How long an exited session's output is kept if nobody removes it.
     pub exit_retention: Duration,
+    /// Keep output that leaves the in-memory buffer on disk, encrypted.
+    pub spill: Option<SpillConfig>,
     /// Set when this program takes over a session from the previous shim
     /// program (an in-place update) instead of starting one.
     pub adopt: Option<handoff::Adopt>,
@@ -53,6 +56,7 @@ impl ShimConfig {
         let mut scrollback = DEFAULT_SCROLLBACK;
         let mut exit_retention = DEFAULT_EXIT_RETENTION;
         let (mut pid, mut generation, mut pty_fd, mut listen_fd, mut state_fd) = (None, 1, None, None, None);
+        let (mut spill_dir, mut spill_limit) = (None, None);
         let mut it = args.into_iter();
         while let Some(flag) = it.next() {
             let mut value = || it.next().with_context(|| format!("{flag} needs a value"));
@@ -67,6 +71,8 @@ impl ShimConfig {
                 "--retention-secs" => {
                     exit_retention = Duration::from_secs(value()?.parse().context("--retention-secs")?)
                 }
+                "--spill-dir" => spill_dir = Some(value()?),
+                "--spill-limit" => spill_limit = Some(value()?.parse().context("--spill-limit")?),
                 "--pid" => pid = Some(value()?.parse().context("--pid")?),
                 "--generation" => generation = value()?.parse().context("--generation")?,
                 "--pty-fd" => pty_fd = Some(value()?.parse().context("--pty-fd")?),
@@ -86,7 +92,13 @@ impl ShimConfig {
             (None, None, None, None) => None,
             _ => bail!("--pid, --pty-fd, --listen-fd and --adopt-state go together"),
         };
+        let spill = match (spill_dir, spill_limit) {
+            (Some(dir), Some(limit)) => Some(SpillConfig { dir, limit }),
+            (None, None) => None,
+            _ => bail!("--spill-dir and --spill-limit go together"),
+        };
         Ok(ShimConfig {
+            spill,
             adopt,
             id,
             runtime_dir: runtime_dir.context("--runtime-dir is required")?,
@@ -125,7 +137,7 @@ async fn async_run(cfg: ShimConfig) -> Result<()> {
             }
             let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
             std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
-            let session = match Session::spawn(&cfg.id, &cfg.opts, cfg.scrollback) {
+            let session = match Session::spawn(&cfg.id, &cfg.opts, cfg.scrollback, cfg.spill.as_ref()) {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = std::fs::remove_file(&sock);
@@ -167,6 +179,8 @@ async fn async_run(cfg: ShimConfig) -> Result<()> {
         _ = exited => tracing::info!(id = %cfg.id, "exit retention passed"),
     }
     let _ = std::fs::remove_file(&sock);
+    // The session is gone: so is what it spilled.
+    let _ = session.set_spill(None);
     // Give in-flight replies a moment to reach their sockets.
     tokio::time::sleep(Duration::from_millis(50)).await;
     Ok(())

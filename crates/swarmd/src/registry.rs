@@ -133,6 +133,17 @@ impl Registry {
         }
     }
 
+    /// Applies the spill-to-disk setting to every running session: on starts
+    /// spilling, off stops and deletes what was spilled.
+    pub async fn apply_spill(&self) {
+        let cfg = crate::spill::config();
+        for info in self.list().into_iter().filter(|s| s.is_running()) {
+            if let Err(e) = self.simple(&info.id, ShimRequest::SetSpill(cfg.clone())).await {
+                tracing::info!(id = %info.id, "spill setting not applied: {e:#}");
+            }
+        }
+    }
+
     /// Moves every running session to this daemon's `swarm-shim`, one at a
     /// time, without restarting them (`force`: even those already on it).
     pub async fn upgrade_shims(&self, force: bool) -> Vec<ShimUpgrade> {
@@ -206,7 +217,11 @@ impl Registry {
             .arg("--runtime-dir")
             .arg(&self.runtime)
             .arg("--opts")
-            .arg(encoded)
+            .arg(encoded);
+        if let Some(cfg) = crate::spill::config() {
+            cmd.arg("--spill-dir").arg(&cfg.dir).arg("--spill-limit").arg(cfg.limit.to_string());
+        }
+        cmd
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(stderr);
@@ -311,6 +326,8 @@ impl Registry {
         match read_frame::<_, ShimMsg>(&mut stream).await? {
             Some(ShimMsg::Ok) => Ok(()),
             Some(ShimMsg::Err(e)) => bail!(e),
+            // A shim closes the connection on a request it can't read.
+            None => bail!("its shim is from an older build that doesn't support this"),
             other => bail!("unexpected reply {other:?}"),
         }
     }

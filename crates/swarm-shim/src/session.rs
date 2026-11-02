@@ -11,12 +11,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use swarm_proto::{
-    now_ms, AttachMode, ClientDesc, CreateOpts, MetaUpdate, SessionInfo, SessionState, ShimMsg, Size,
+    now_ms, AttachMode, ClientDesc, CreateOpts, MetaUpdate, SessionInfo, SessionState, ShimMsg, Size, SpillConfig,
 };
 use tokio::sync::{mpsc, watch};
 
 use crate::buffer::Ring;
 use crate::scan::Scanner;
+use crate::spill::Spill;
 
 /// Output chunks a client may have queued before it is considered lagged.
 const CLIENT_QUEUE: usize = 1024;
@@ -145,6 +146,8 @@ pub(crate) struct Inner {
     pub(crate) info: SessionInfo,
     clients: HashMap<u64, Slot>,
     pub(crate) next_client: u64,
+    /// Where output leaving `ring` goes, if spill-to-disk is on.
+    pub(crate) spill: Option<Arc<Spill>>,
     last_notify: Instant,
     /// An activity change was held back by the notify interval; the periodic
     /// `refresh` publishes it, so the last output's numbers aren't lost.
@@ -163,6 +166,7 @@ impl Inner {
             info,
             clients: HashMap::new(),
             next_client: 1,
+            spill: None,
             last_notify: Instant::now(),
             unpublished: false,
         }
@@ -196,6 +200,8 @@ pub struct Attachment {
     pub exited: Option<(Option<i32>, Option<i32>)>,
     /// The session is in a full-screen app: nudge its size so it repaints.
     pub wants_repaint: bool,
+    /// `History` attach: spilled output before this offset, to send first.
+    pub spill: Option<(Arc<Spill>, u64)>,
 }
 
 impl Attachment {
@@ -206,7 +212,7 @@ impl Attachment {
 }
 
 impl Session {
-    pub fn spawn(id: &str, opts: &CreateOpts, scrollback: usize) -> Result<Arc<Session>> {
+    pub fn spawn(id: &str, opts: &CreateOpts, scrollback: usize, spill: Option<&SpillConfig>) -> Result<Arc<Session>> {
         let size = opts.size;
         let pair = native_pty_system()
             .openpty(PtySize { rows: size.rows.max(1), cols: size.cols.max(1), pixel_width: 0, pixel_height: 0 })
@@ -262,7 +268,13 @@ impl Session {
             buffer_end: 0,
             alt_screen: false,
         };
-        let inner = Inner::new(Ring::new(scrollback), vt100::Parser::new(info.size.rows, info.size.cols, 0), info);
+        let mut inner = Inner::new(Ring::new(scrollback), vt100::Parser::new(info.size.rows, info.size.cols, 0), info);
+        if let Some(cfg) = spill {
+            match Spill::create(cfg, id) {
+                Ok(s) => inner.spill = Some(s),
+                Err(e) => tracing::warn!(id, "spill-to-disk is off for this session: {e:#}"),
+            }
+        }
         Session::start(master, pid, inner, 0)
     }
 
@@ -344,7 +356,14 @@ impl Session {
     fn on_output(&self, data: &[u8]) {
         let mut inner = self.inner.lock().unwrap();
         let offset = inner.ring.end();
-        inner.ring.push(data);
+        match inner.spill.clone() {
+            Some(spill) => {
+                if let Some((at, dropped)) = inner.ring.push_taking(data) {
+                    spill.append(at, &dropped);
+                }
+            }
+            None => inner.ring.push(data),
+        }
         inner.screen.process(data);
         let ev = inner.scanner.feed(offset, data);
         for b in ev.boundaries {
@@ -438,11 +457,13 @@ impl Session {
 
     pub fn attach(&self, desc: ClientDesc, mode: AttachMode, size: Option<Size>) -> Attachment {
         let mut inner = self.inner.lock().unwrap();
+        let history = mode == AttachMode::History;
         let replay_from = match mode {
             AttachMode::Full => inner.ring.replay_start(),
             AttachMode::ResumeFrom(o) if inner.ring.contains(o) => o,
             AttachMode::ResumeFrom(_) => inner.ring.replay_start(),
             AttachMode::Live => inner.ring.end(),
+            AttachMode::History => inner.ring.start(),
         };
         let full = matches!(mode, AttachMode::Full) || (matches!(mode, AttachMode::ResumeFrom(o) if !inner.ring.contains(o)));
         // The ring may have dropped the start of a command whose output it
@@ -465,8 +486,18 @@ impl Session {
             }
         }
         let live_from = inner.ring.end();
-        let replay = inner.ring.replay_pieces(replay_from, REPLAY_BLOCK_HEAD, REPLAY_BLOCK_LINES);
-        let replay = inner.ring.with_times(replay);
+        let replay = if history {
+            // Everything, as it was written: no cut blocks, no time marks.
+            inner.ring.slice(replay_from, live_from).map(|b| vec![(replay_from, b)]).unwrap_or_default()
+        } else {
+            let replay = inner.ring.replay_pieces(replay_from, REPLAY_BLOCK_HEAD, REPLAY_BLOCK_LINES);
+            inner.ring.with_times(replay)
+        };
+        let spill = inner.spill.clone().filter(|_| history).map(|s| (s, replay_from));
+        let replay_from = spill
+            .as_ref()
+            .and_then(|(s, until)| s.pieces(*until).first().map(|p| p.start()))
+            .unwrap_or(replay_from);
         let prelude = if full {
             let mut prelude: Vec<(u64, Vec<u8>)> =
                 inner.sticky.iter().filter(|(_, off, _)| *off < replay_from).map(|(_, off, b)| (*off, b.clone())).collect();
@@ -499,7 +530,7 @@ impl Session {
         });
         self.notify(&mut inner, true);
         let info = self.snapshot(&inner);
-        Attachment { client_id, rx, lag, info, replay_from, live_from, replay, prelude, screen, exited, wants_repaint }
+        Attachment { client_id, rx, lag, info, replay_from, live_from, replay, prelude, screen, exited, wants_repaint, spill }
     }
 
     pub fn detach(&self, client_id: u64) {
@@ -623,9 +654,31 @@ impl Session {
     /// Drops all but the last `keep` bytes of scrollback and frees the memory.
     pub fn trim(&self, keep: usize) {
         let mut inner = self.inner.lock().unwrap();
-        if inner.ring.trim(keep) {
+        let trimmed = match inner.spill.clone() {
+            Some(spill) => inner.ring.trim_taking(keep).map(|(at, dropped)| spill.append(at, &dropped)).is_some(),
+            None => inner.ring.trim(keep),
+        };
+        if trimmed {
             self.notify(&mut inner, true);
         }
+    }
+
+    /// Starts (`Some`) or stops spilling to disk; stopping deletes the spill.
+    pub fn set_spill(&self, cfg: Option<SpillConfig>) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        match cfg {
+            None => {
+                if let Some(spill) = inner.spill.take() {
+                    spill.destroy();
+                }
+            }
+            Some(cfg) if inner.spill.is_none() => {
+                let id = inner.info.id.clone();
+                inner.spill = Some(Spill::create(&cfg, &id)?);
+            }
+            Some(_) => {}
+        }
+        Ok(())
     }
 
     pub fn info(&self) -> SessionInfo {

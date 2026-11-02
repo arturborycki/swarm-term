@@ -101,6 +101,35 @@ impl Ring {
         }
     }
 
+    /// Like `push`, and returns the bytes it dropped from the front, with
+    /// the offset they started at.
+    pub fn push_taking(&mut self, bytes: &[u8]) -> Option<(u64, Vec<u8>)> {
+        let overflow = (self.data.len() + bytes.len()).saturating_sub(self.capacity);
+        if overflow == 0 {
+            self.push(bytes);
+            return None;
+        }
+        let start = self.start;
+        let mut dropped: Vec<u8> = self.data.iter().take(overflow).copied().collect();
+        if overflow > self.data.len() {
+            dropped.extend_from_slice(&bytes[..overflow - self.data.len()]);
+        }
+        self.push(bytes);
+        Some((start, dropped))
+    }
+
+    /// Like `trim`, and returns the bytes it dropped, with their offset.
+    pub fn trim_taking(&mut self, keep: usize) -> Option<(u64, Vec<u8>)> {
+        let drop = self.data.len().saturating_sub(keep);
+        if drop == 0 {
+            return None;
+        }
+        let start = self.start;
+        let dropped: Vec<u8> = self.data.iter().take(drop).copied().collect();
+        self.trim(keep);
+        Some((start, dropped))
+    }
+
     /// Drops all but the last `keep` bytes and releases the memory they used
     /// (the buffer grows again with new output). Whether anything was dropped.
     pub fn trim(&mut self, keep: usize) -> bool {
@@ -281,6 +310,24 @@ impl Ring {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_taking_and_trim_taking_return_exactly_what_was_dropped() {
+        let mut r = Ring::new(8);
+        let mut seen = Vec::new();
+        for chunk in [&b"abcde"[..], b"fghij", b"klmnopqrstuvwxyz"] {
+            if let Some((off, d)) = r.push_taking(chunk) {
+                assert_eq!(off, seen.len() as u64);
+                seen.extend(d);
+            }
+        }
+        if let Some((off, d)) = r.trim_taking(3) {
+            assert_eq!(off, seen.len() as u64);
+            seen.extend(d);
+        }
+        seen.extend(r.slice_from(r.start()));
+        assert_eq!(seen, b"abcdefghijklmnopqrstuvwxyz");
+    }
 
     #[test]
     fn export_and_import_keep_contents_offsets_boundaries_and_times() {

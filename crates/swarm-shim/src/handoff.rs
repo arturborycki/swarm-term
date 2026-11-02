@@ -22,10 +22,17 @@ use swarm_proto::{paths, SessionInfo, SessionState, Size};
 
 use crate::buffer::{Ring, RingState};
 use crate::session::{BlockHeader, Inner, Session};
+use crate::spill::{Spill, SpillHandoff};
 
-/// Version of `HandoffState`. A program takes over a session only from a
-/// shim that writes a version it reads (`--accepts-handoff`).
-pub const HANDOFF_VERSION: u32 = 1;
+/// Version of `HandoffState` this program writes. A program takes over a
+/// session only from a shim that writes a version it reads (`accepts`).
+pub const HANDOFF_VERSION: u32 = 2;
+
+/// Whether this program can read handoff format `version`: this one, and 1
+/// (the same state without the spill).
+pub fn accepts(version: u32) -> bool {
+    matches!(version, 1 | 2)
+}
 
 /// How far back output is fed again to rebuild the scanner's parser state.
 const RESCAN_LIMIT: usize = 4 * 1024 * 1024;
@@ -33,6 +40,21 @@ const RESCAN_LIMIT: usize = 4 * 1024 * 1024;
 /// What the previous program hands over, besides the PTY and the socket.
 #[derive(Serialize, Deserialize)]
 struct HandoffState {
+    version: u32,
+    info: SessionInfo,
+    ring: RingState,
+    sticky: Vec<(String, u64, Vec<u8>)>,
+    pending_precmd: Option<(u64, Vec<u8>)>,
+    headers: Vec<BlockHeader>,
+    screen: ScreenState,
+    next_client: u64,
+    /// Spill-to-disk, with its key, if it's on (format 2).
+    spill: Option<SpillHandoff>,
+}
+
+/// Format 1: format 2 without `spill`.
+#[derive(Deserialize)]
+struct HandoffStateV1 {
     version: u32,
     info: SessionInfo,
     ring: RingState,
@@ -132,6 +154,7 @@ fn export(inner: &Inner) -> HandoffState {
         headers: inner.headers.iter().cloned().collect(),
         screen: ScreenState { rows, cols, alternate: screen.alternate_screen(), contents: screen.state_formatted() },
         next_client: inner.next_client,
+        spill: inner.spill.as_ref().map(|s| s.export()),
     }
 }
 
@@ -220,11 +243,25 @@ fn read_state(fd: RawFd) -> Result<HandoffState> {
     file.rewind()?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    let state: HandoffState = postcard::from_bytes(&bytes).context("decode")?;
-    if state.version != HANDOFF_VERSION {
-        bail!("handoff format {} (this program reads {HANDOFF_VERSION})", state.version);
+    let (version, _) = postcard::take_from_bytes::<u32>(&bytes).context("decode the format")?;
+    match version {
+        1 => {
+            let v1: HandoffStateV1 = postcard::from_bytes(&bytes).context("decode")?;
+            Ok(HandoffState {
+                version: v1.version,
+                info: v1.info,
+                ring: v1.ring,
+                sticky: v1.sticky,
+                pending_precmd: v1.pending_precmd,
+                headers: v1.headers,
+                screen: v1.screen,
+                next_client: v1.next_client,
+                spill: None,
+            })
+        }
+        HANDOFF_VERSION => postcard::from_bytes(&bytes).context("decode"),
+        other => bail!("handoff format {other} (this program reads 1 and {HANDOFF_VERSION})"),
     }
-    Ok(state)
 }
 
 fn import(state: HandoffState, scrollback: usize) -> Inner {
@@ -251,6 +288,13 @@ fn import(state: HandoffState, scrollback: usize) -> Inner {
     inner.headers = state.headers.into();
     inner.next_client = state.next_client;
     inner.info.clients.clear();
+    inner.spill = state.spill.and_then(|h| match Spill::import(h) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!("couldn't carry on spilling to disk: {e:#}");
+            None
+        }
+    });
     inner
 }
 

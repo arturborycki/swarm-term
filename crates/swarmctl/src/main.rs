@@ -71,6 +71,14 @@ enum Cmd {
     },
     /// Show everything known about a session.
     Info { session: String },
+    /// Print a session's output: everything still kept, including what was
+    /// spilled to disk (`swarmd spill on`), oldest first.
+    Dump {
+        session: String,
+        /// The bytes as written, escape sequences included.
+        #[arg(long)]
+        raw: bool,
+    },
     /// Daemon control.
     Daemon {
         #[command(subcommand)]
@@ -193,6 +201,33 @@ async fn run(cli: Cli) -> Result<i32> {
             print_info(&s);
             Ok(0)
         }
+        Cmd::Dump { session, raw } => {
+            let s = find(&client, &session).await?;
+            let mut att = client.attach(&s.id, AttachMode::History, None, true).await?;
+            let end = att.live_from;
+            let mut text = TextFilter::default();
+            let mut out = std::io::stdout().lock();
+            let mut at = att.replay_from;
+            while at < end {
+                match att.recv().await {
+                    Some(StreamEvent::Output { offset, data, .. }) => {
+                        let keep = &data[..data.len().min(end.saturating_sub(offset) as usize)];
+                        if raw {
+                            out.write_all(keep)?;
+                        } else {
+                            out.write_all(&text.feed(keep))?;
+                        }
+                        at = offset + data.len() as u64;
+                    }
+                    Some(StreamEvent::Exited { .. }) => {}
+                    Some(StreamEvent::Lagged { .. } | StreamEvent::Closed { .. }) | None => break,
+                }
+            }
+            out.flush()?;
+            drop(out);
+            let _ = att.detach().await;
+            Ok(0)
+        }
         Cmd::Daemon { cmd } => match cmd {
             DaemonCmd::Status | DaemonCmd::Start => {
                 client.ping().await?;
@@ -248,6 +283,58 @@ async fn service(host: &Option<String>, args: &str) -> Result<i32> {
     };
     let status = cmd.status().await.context("run swarmd service")?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Terminal output as plain text: escape sequences (colors, cursor moves,
+/// titles, Warp's shell hooks) and carriage returns removed. Keeps its state
+/// across chunks, which can split a sequence.
+#[derive(Default)]
+struct TextFilter {
+    state: FilterState,
+}
+
+#[derive(Default, Clone, Copy, PartialEq)]
+enum FilterState {
+    #[default]
+    Text,
+    /// After ESC.
+    Escape,
+    /// In a CSI sequence (`ESC [`), until its final byte.
+    Csi,
+    /// In a string (OSC, DCS, APC, PM, SOS) until BEL or `ESC \`.
+    Str,
+    /// ESC seen inside a string.
+    StrEscape,
+}
+
+impl TextFilter {
+    fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+        use FilterState::*;
+        let mut out = Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            self.state = match (self.state, b) {
+                (Text, 0x1b) => Escape,
+                (Text, b'\r') => Text,
+                (Text, b) if b >= 0x20 || b == b'\n' || b == b'\t' => {
+                    out.push(b);
+                    Text
+                }
+                (Text, _) => Text,
+                (Escape, b'[') => Csi,
+                (Escape, b']' | b'P' | b'_' | b'^' | b'X') => Str,
+                (Escape, _) => Text,
+                (Csi, 0x40..=0x7e) => Text,
+                (Csi, _) => Csi,
+                (Str, 0x07) => Text,
+                (Str, 0x1b) => StrEscape,
+                (Str, _) => Str,
+                (StrEscape, b'\\') => Text,
+                (StrEscape, 0x1b) => StrEscape,
+                (StrEscape, _) => Str,
+            };
+        }
+        out
+    }
 }
 
 async fn find(client: &Client, query: &str) -> Result<SessionInfo> {
@@ -493,4 +580,18 @@ async fn attach(client: &Client, id: &str, readonly: bool, live: bool) -> Result
 
 async fn reattach(client: &Client, id: &str, from: u64, readonly: bool) -> Result<Attachment> {
     client.attach(id, AttachMode::ResumeFrom(from), Some(terminal_size()), readonly).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TextFilter;
+
+    #[test]
+    fn text_filter_drops_escapes_split_across_chunks() {
+        let mut f = TextFilter::default();
+        let mut out = f.feed(b"\x1b[1;32mgreen\x1b[0m\r\nhook:\x1bP$d7b2268");
+        out.extend(f.feed(b"6f6f6b\x1b"));
+        out.extend(f.feed(b"\\done \x1b]0;title\x07!\n"));
+        assert_eq!(String::from_utf8(out).unwrap(), "green\nhook:done !\n");
+    }
 }
