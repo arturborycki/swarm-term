@@ -3,6 +3,10 @@
   // Static site only: Workers serves dist/ as assets, with no server code.
   "name": "swarm-term",
   "compatibility_date": "2026-11-01",
+  "routes": [
+    { "pattern": "swarm-term.com", "custom_domain": true },
+    { "pattern": "www.swarm-term.com", "custom_domain": true }
+  ],
   "assets": {
     "directory": "./dist",
     "not_found_handling": "404-page"

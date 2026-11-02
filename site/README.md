@@ -16,7 +16,7 @@ Everything is uploaded from this checkout with `wrangler`, so it works while the
 npx wrangler login
 ```
 
-**Site (Cloudflare Workers static assets).** `scripts/deploy.sh` builds and uploads `dist/` to the Worker `swarm-term` (`wrangler.jsonc`: static files only, no server code; unknown paths get `404.html`). It's live at `swarm-term.artur-borycki.workers.dev`; `scripts/deploy.sh preview` uploads a version with its own preview URL and leaves the live site alone. To serve it at `swarm-term.com`, add `"routes": [{ "pattern": "swarm-term.com", "custom_domain": true }, { "pattern": "www.swarm-term.com", "custom_domain": true }]` to `wrangler.jsonc` and deploy; the domain is already on Cloudflare, so the DNS records are created for you.
+**Site (Cloudflare Workers static assets).** `scripts/deploy.sh` builds and uploads `dist/` to the Worker `swarm-term` (`wrangler.jsonc`: static files only, no server code; unknown paths get `404.html`). It serves `swarm-term.com` and `www.swarm-term.com` (custom domains in `wrangler.jsonc`; Cloudflare created the DNS records and certificate). `scripts/deploy.sh preview` uploads a version with its own preview URL and leaves the live site alone.
 
 **Downloads (Cloudflare R2).** The DMG is too big for static assets (25 MiB per file), so it lives in the R2 bucket `swarm-downloads`, served at `downloads.swarm-term.com`. R2 doesn't charge for downloads.
 
