@@ -861,6 +861,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "postcard",
+ "serde",
  "swarm-proto",
  "tempfile",
  "tokio",

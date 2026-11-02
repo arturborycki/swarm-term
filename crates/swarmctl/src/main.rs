@@ -90,6 +90,13 @@ enum DaemonCmd {
     UninstallService,
     /// Show whether the daemon starts at login.
     ServiceStatus,
+    /// Move running sessions to the daemon's shim program without
+    /// restarting them (the daemon does this itself when it starts).
+    UpgradeShims {
+        /// Also redo sessions whose shim already runs the daemon's build.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn parse_kv(s: &str) -> Result<(String, String), String> {
@@ -197,6 +204,27 @@ async fn run(cli: Cli) -> Result<i32> {
                 client.shutdown_daemon().await?;
                 println!("swarmd stopped; sessions keep running");
                 Ok(0)
+            }
+            DaemonCmd::UpgradeShims { force } => {
+                use swarm_proto::ShimUpgradeOutcome::*;
+                let results = client.upgrade_shims(force).await?;
+                let mut failed = false;
+                for r in &results {
+                    let what = match &r.outcome {
+                        Upgraded => "updated in place".to_string(),
+                        UpToDate => "already up to date".to_string(),
+                        Skipped(why) => format!("skipped: {why}"),
+                        Failed(why) => {
+                            failed = true;
+                            format!("failed: {why}")
+                        }
+                    };
+                    println!("{}  {what}", &r.id[..r.id.len().min(10)]);
+                }
+                if results.is_empty() {
+                    println!("no sessions");
+                }
+                Ok(if failed { 1 } else { 0 })
             }
             DaemonCmd::InstallService | DaemonCmd::UninstallService | DaemonCmd::ServiceStatus => unreachable!(),
         },

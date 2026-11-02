@@ -155,6 +155,12 @@ fn run(if_not_running: bool) -> Result<()> {
 
         let registry = registry::Registry::new(runtime.clone(), shim);
         registry.adopt_existing().await?;
+        // Sessions started by an older build move to this build's shim,
+        // one at a time, without restarting.
+        let upgrading = registry.clone();
+        tokio::spawn(async move {
+            upgrading.upgrade_shims(false).await;
+        });
         restore::start(&registry).await;
         tokio::spawn(memory::run(registry.clone()));
         let shutdown = Arc::new(Notify::new());

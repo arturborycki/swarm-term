@@ -9,6 +9,7 @@ license.workspace = true
 swarm-proto.workspace = true
 anyhow.workspace = true
 postcard.workspace = true
+serde.workspace = true
 libc.workspace = true
 portable-pty.workspace = true
 tokio.workspace = true

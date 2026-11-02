@@ -289,6 +289,15 @@ impl Client {
         self.request(Request::Shutdown).await.map(|_| ())
     }
 
+    /// Moves running sessions to the daemon's `swarm-shim` without
+    /// restarting them (`force`: even those already on its build).
+    pub async fn upgrade_shims(&self, force: bool) -> Result<Vec<swarm_proto::ShimUpgrade>> {
+        match self.request(Request::UpgradeShims { force }).await? {
+            Response::ShimsUpgraded(results) => Ok(results),
+            other => bail!("unexpected {other:?}"),
+        }
+    }
+
     /// Session events from now on. The first call subscribes the connection.
     pub async fn subscribe(&self) -> Result<broadcast::Receiver<SessionEvent>> {
         let rx = self.shared.events.subscribe();

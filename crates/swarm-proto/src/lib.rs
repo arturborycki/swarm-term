@@ -147,6 +147,9 @@ pub enum Request {
     Subscribe,
     /// Stop the daemon. Sessions keep running and are re-adopted on restart.
     Shutdown,
+    /// Moves running sessions to this daemon's `swarm-shim` without
+    /// restarting them; `force` also redoes shims already on this build.
+    UpgradeShims { force: bool },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -163,6 +166,26 @@ pub enum Response {
         /// Output at or after this offset is live; earlier output is replay.
         live_from: u64,
     },
+    ShimsUpgraded(Vec<ShimUpgrade>),
+}
+
+/// What `UpgradeShims` did with one session.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ShimUpgrade {
+    pub id: SessionId,
+    pub outcome: ShimUpgradeOutcome,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ShimUpgradeOutcome {
+    /// Its shim now runs the daemon's build; the session kept running.
+    Upgraded,
+    /// Its shim already runs the daemon's build.
+    UpToDate,
+    /// Left alone, and why (it has exited, or its shim can't be updated in place).
+    Skipped(String),
+    /// The update didn't happen; the session keeps running on its old shim.
+    Failed(String),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -209,6 +232,12 @@ pub enum ShimRequest {
     SetMeta(MetaUpdate),
     /// Keep only the last `keep` bytes of scrollback (memory is short).
     Trim { keep: u64 },
+    /// Which build the shim runs: answered with `ShimMsg::Version`.
+    Version,
+    /// Replace the shim's program with `exe`, keeping the session (same
+    /// process, PTY, child and scrollback). Answered `Ok` once `exe` has
+    /// agreed to take the session over, just before the switch.
+    Upgrade { exe: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -228,6 +257,9 @@ pub enum ShimMsg {
     Output { offset: u64, data: Vec<u8>, replay: bool },
     Exited { code: Option<i32>, signal: Option<i32> },
     Lagged { resume_at: u64 },
+    /// `build_id` of the running shim program, the handoff format it reads
+    /// and writes, and how many times it has been replaced in place.
+    Version { build_id: String, handoff: u32, generation: u32 },
 }
 
 /// Hex encoding, used to pass `CreateOpts` to a shim on its command line.

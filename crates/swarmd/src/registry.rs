@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use swarm_proto::{
     paths, read_frame, write_frame, AttachMode, ClientDesc, CreateOpts, MetaUpdate, SessionEvent, SessionId,
-    SessionInfo, ShimMsg, ShimRequest, Size,
+    SessionInfo, ShimMsg, ShimRequest, ShimUpgrade, ShimUpgradeOutcome, Size,
 };
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
@@ -82,18 +82,105 @@ impl Registry {
         let this = self.clone();
         let id = id.to_string();
         tokio::spawn(async move {
-            while let Ok(Some(ShimMsg::Changed(info))) = read_frame::<_, ShimMsg>(&mut stream).await {
-                // A late update must not resurrect a session that was just removed.
-                match this.sessions.lock().unwrap().get_mut(&id) {
-                    Some(slot) => *slot = info.clone(),
-                    None => break,
+            loop {
+                let mut removed = false;
+                while let Ok(Some(ShimMsg::Changed(info))) = read_frame::<_, ShimMsg>(&mut stream).await {
+                    // A late update must not resurrect a session that was just removed.
+                    match this.sessions.lock().unwrap().get_mut(&id) {
+                        Some(slot) => *slot = info.clone(),
+                        None => {
+                            removed = true;
+                            break;
+                        }
+                    }
+                    let _ = this.events.send(SessionEvent::Updated(info));
                 }
-                let _ = this.events.send(SessionEvent::Updated(info));
+                // A shim replacing its program (an in-place update) keeps its
+                // socket listening: watch the new program.
+                match this.rewatch(&id).await {
+                    Some(s) if !removed => stream = s,
+                    _ => break,
+                }
             }
             // The shim is gone: removed, or its exit retention passed.
             this.forget(&id);
         });
         Ok(info)
+    }
+
+    /// Watches a shim again after its watch connection ended, if it's still
+    /// there (it was updated in place). `None` if it's gone.
+    async fn rewatch(&self, id: &str) -> Option<UnixStream> {
+        let mut stream = self.connect(id).await.ok()?;
+        write_frame(&mut stream, &ShimRequest::Watch).await.ok()?;
+        let reply = tokio::time::timeout(Duration::from_secs(10), read_frame::<_, ShimMsg>(&mut stream)).await;
+        let Ok(Ok(Some(ShimMsg::Changed(info)))) = reply else { return None };
+        match self.sessions.lock().unwrap().get_mut(id) {
+            Some(slot) => *slot = info.clone(),
+            None => return None,
+        }
+        let _ = self.events.send(SessionEvent::Updated(info));
+        Some(stream)
+    }
+
+    /// The shim's build, handoff format and in-place update count.
+    async fn shim_version(&self, id: &str) -> Result<(String, u32, u32)> {
+        let mut stream = self.connect(id).await?;
+        write_frame(&mut stream, &ShimRequest::Version).await?;
+        match read_frame::<_, ShimMsg>(&mut stream).await? {
+            Some(ShimMsg::Version { build_id, handoff, generation }) => Ok((build_id, handoff, generation)),
+            other => bail!("unexpected reply {other:?}"),
+        }
+    }
+
+    /// Moves every running session to this daemon's `swarm-shim`, one at a
+    /// time, without restarting them (`force`: even those already on it).
+    pub async fn upgrade_shims(&self, force: bool) -> Vec<ShimUpgrade> {
+        let mut results = Vec::new();
+        for info in self.list() {
+            let outcome = self.upgrade_shim(&info, force).await;
+            match &outcome {
+                ShimUpgradeOutcome::Upgraded => tracing::info!(id = %info.id, "moved the session to the new shim"),
+                ShimUpgradeOutcome::Failed(e) => tracing::warn!(id = %info.id, "couldn't update its shim: {e}"),
+                ShimUpgradeOutcome::Skipped(why) => tracing::info!(id = %info.id, "shim left as is: {why}"),
+                ShimUpgradeOutcome::UpToDate => {}
+            }
+            results.push(ShimUpgrade { id: info.id, outcome });
+        }
+        results
+    }
+
+    async fn upgrade_shim(&self, info: &SessionInfo, force: bool) -> ShimUpgradeOutcome {
+        if !info.is_running() {
+            return ShimUpgradeOutcome::Skipped("the session has exited".into());
+        }
+        let Ok((build, _, generation)) = self.shim_version(&info.id).await else {
+            return ShimUpgradeOutcome::Skipped(
+                "its shim predates in-place updates; it moves to the new build when the session is restarted".into(),
+            );
+        };
+        if build == swarm_proto::BUILD_ID && !force {
+            return ShimUpgradeOutcome::UpToDate;
+        }
+        let exe = self.shim_exe.display().to_string();
+        if let Err(e) = self.simple(&info.id, ShimRequest::Upgrade { exe }).await {
+            return ShimUpgradeOutcome::Failed(format!("{e:#}"));
+        }
+        // The shim answered and is switching programs; the new one answers
+        // with a higher generation once it has the session.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Ok((_, _, now)) = self.shim_version(&info.id).await {
+                if now > generation {
+                    return ShimUpgradeOutcome::Upgraded;
+                }
+            }
+        }
+        ShimUpgradeOutcome::Failed(format!(
+            "the shim kept its old program; see {}",
+            paths::log_dir().join("shims.log").display()
+        ))
     }
 
     pub fn list(&self) -> Vec<SessionInfo> {
