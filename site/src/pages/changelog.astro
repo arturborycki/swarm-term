@@ -1,12 +1,23 @@
 ---
 import Base from '../layouts/Base.astro';
-import { RELEASE, REPO_PUBLIC } from '../site';
+import { REPO, REPO_PUBLIC } from '../site';
 
 const releases = [
   {
+    version: '0.1.1',
+    date: '2026-11-02',
+    href: `${REPO}/releases/tag/v0.1.1`,
+    items: [
+      'New app icon: the Hive. The 0.1.0 download still had the old one.',
+      'A color you give a session now shows in the sidebar too, not just on its tab.',
+      'swarm:// links open launch configurations in Swarm.',
+      'Check for Updates… reads new releases from swarm-term.com, so it works while the repository is private.',
+    ],
+  },
+  {
     version: '0.1.0',
     date: '2026-11-01',
-    href: RELEASE,
+    href: `${REPO}/releases/tag/v0.1.0`,
     items: [
       'Persistent sessions: tabs keep running when you close the window, quit the app or restart the daemon, and reopen with their output and blocks.',
       'Remote hosts over your own ssh setup, Linux or macOS. Swarm installs its daemon there and reconnects after sleep and network drops.',

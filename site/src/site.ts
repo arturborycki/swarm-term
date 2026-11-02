@@ -1,4 +1,4 @@
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.1';
 export const REPO = 'https://github.com/arturborycki/swarm-term';
 /** While the repository is private, links into it are shown grayed out instead of leading to a 404. */
 export const REPO_PUBLIC = false;
