@@ -29,6 +29,8 @@ scripts/upload-release.sh          # uploads dist/Swarm-<version>.dmg from the r
 
 **Updates.** `/releases/latest.json` describes the current release in the same shape as GitHub's API, for the app's "Check for Updates…", plus the DMG's `sha256` and Ed25519 `signature` (`DMG_SHA256`, `DMG_SIGNATURE` in `src/site.ts`, written by `scripts/sign-update.sh`). The app installs an update itself only when that signature verifies with the release key built into it, so sign every release before deploying the site. The private key is `~/.config/swarm-term/update-signing-key.pem` on the release Mac; keep a backup.
 
+**Issue reports.** `/report/` is a form that `worker/index.ts` (the only server code; it runs for `/api/*`) emails to info@swarm-term.com through Email Routing's `send_email` binding, with the reporter as Reply-To. A Worker may only mail verified destinations, so it delivers to the address info@ forwards to, set once with `npx wrangler secret put REPORT_TO`. Nothing is stored. A hidden honeypot field drops bots, and the Workers rate limiter allows 3 sent reports per minute per address. Email Routing forwards info@ to the account's verified address. `npx wrangler types worker/worker-configuration.d.ts` regenerates the binding types after changing `wrangler.jsonc`; `npx wrangler dev` runs the Worker locally and saves sent mail under `.wrangler/tmp/email/` instead of sending it.
+
 **Going public later.** Set `REPO_PUBLIC = true` in `src/site.ts` to turn the grayed-out GitHub links back on.
 
 ## Updating
