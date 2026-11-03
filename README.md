@@ -20,9 +20,10 @@ universal build for Apple silicon and Intel. Download the DMG from
 - **Scrollback:** 16 MB per session is kept in memory. More can optionally be
   kept on disk, encrypted.
 
-The 0.1 DMG is not notarized yet, so Gatekeeper blocks the first launch.
-To allow it, open System Settings → Privacy & Security, scroll down and
-click Open Anyway.
+Since 0.1.2 the DMG is signed with a Developer ID and notarized, and the
+app installs its own updates (Install and Restart), each checked against
+the release signature. 0.1.0 and 0.1.1 aren't notarized: allow them once in
+System Settings → Privacy & Security → Open Anyway.
 
 | Crate | What it is |
 |---|---|

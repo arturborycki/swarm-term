@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // Workers serves dist/ as static assets. The only server code is
+  // worker/index.ts, which runs for /api/* (the issue form) and nothing else.
+  "name": "swarm-term",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-11-01",
+  "routes": [
+    { "pattern": "swarm-term.com", "custom_domain": true },
+    { "pattern": "www.swarm-term.com", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "404-page",
+    "run_worker_first": ["/api/*"]
+  },
+  // Issue reports. A Worker may only mail verified Email Routing destinations, so
+  // it sends to the one info@swarm-term.com forwards to, kept out of the
+  // repository as the secret REPORT_TO (`npx wrangler secret put REPORT_TO`).
+  "send_email": [{ "name": "REPORTS" }],
+  // Per visitor address: 3 reports a minute.
+  "ratelimits": [{ "name": "REPORT_LIMIT", "namespace_id": "1001", "simple": { "limit": 3, "period": 60 } }]
+}

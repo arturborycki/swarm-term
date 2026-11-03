@@ -30,11 +30,13 @@ const toc = [
       <ol>
         <li><a href={DMG}>Download Swarm-{VERSION}.dmg</a>. It's a universal app for Apple silicon and Intel and needs macOS 13 Ventura or later.</li>
         <li>Open the DMG and drag <strong>Swarm.app</strong> to Applications.</li>
-        <li>
-          This early build isn't notarized yet, so macOS blocks the first launch. Open System Settings → Privacy &amp;
-          Security, scroll down and click <strong>Open Anyway</strong>.
-        </li>
+        <li>Open Swarm. It's notarized by Apple, so macOS opens it after the usual "downloaded from the internet" question.</li>
       </ol>
+      <p>
+        Swarm checks for new versions shortly after launch and daily (also <strong>Swarm → Check for Updates…</strong>)
+        and offers <strong>Install and Restart</strong>. It installs only downloads signed with Swarm's release key, and
+        your sessions keep running through the restart.
+      </p>
       <p>To use <code>swarmctl</code> from any terminal, link it onto your <code>PATH</code>:</p>
       <pre class="term">ln -s /Applications/Swarm.app/Contents/MacOS/swarmctl /usr/local/bin/swarmctl</pre>
 
@@ -107,9 +109,10 @@ const toc = [
       </p>
 
       <h2 id="troubleshooting">Troubleshooting</h2>
+      <p>Something not covered here? <a href="/report/">Report an issue</a> and we'll reply by email.</p>
       <dl>
         <dt>macOS says Swarm can't be opened</dt>
-        <dd>Allow it once in System Settings → Privacy &amp; Security → Open Anyway. Notarized builds are coming.</dd>
+        <dd>Versions before 0.1.2 aren't notarized: allow them once in System Settings → Privacy &amp; Security → Open Anyway, or install the current version.</dd>
         <dt>A remote tab keeps reconnecting</dt>
         <dd>Check that <code>ssh &lt;host&gt;</code> works without a password prompt from a terminal; Swarm uses the same configuration.</dd>
         <dt>A session I closed is gone from the tabs</dt>

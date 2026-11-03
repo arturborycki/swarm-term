@@ -1,0 +1,31 @@
+---
+import Base from '../../layouts/Base.astro';
+---
+
+<Base title="Report sent — Swarm" description="Your issue report was sent.">
+  <section class="frame sent">
+    <p class="label"># report <span class="dim">[ sent ]</span></p>
+    <h1>Thanks, your report is on its way</h1>
+    <p class="lede">It went to info@swarm-term.com. We'll reply to the email address you gave.</p>
+    <div class="actions">
+      <a class="btn primary" href="/">Home</a>
+      <a class="btn" href="/report/">Report another</a>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .sent {
+    padding-top: 96px;
+    padding-bottom: 120px;
+    display: grid;
+    gap: 20px;
+    justify-items: start;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+</style>

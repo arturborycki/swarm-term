@@ -1,0 +1,239 @@
+---
+import Base from '../../layouts/Base.astro';
+import { VERSION } from '../../site';
+
+// Keep in sync with CATEGORIES in worker/index.ts.
+const categories = ['Bug', 'Crash', 'Install or update', 'Remote hosts', 'Question or idea'];
+---
+
+<Base title="Report an issue — Swarm" description="Tell us what went wrong in Swarm. Reports go straight to the developer by email.">
+  <div class="frame report">
+    <div class="intro">
+      <p class="label"># report <span class="dim">[ issue ]</span></p>
+      <h1>Report an issue</h1>
+      <p class="lede">
+        Something broke, or behaved in a way you didn't expect? Tell us here. Your report is emailed
+        to <a href="mailto:info@swarm-term.com">info@swarm-term.com</a> and isn't published or kept on this site.
+        We reply to the address you give.
+      </p>
+      <p class="hint">
+        Useful to include: what you did, what you expected, what happened instead, and whether the session was on this
+        Mac or a remote host. <code>swarmctl info &lt;session&gt;</code> and <code>~/Library/Logs/swarm.log</code> often
+        help.
+      </p>
+    </div>
+
+    <form id="report" method="post" action="/api/report">
+      <p class="status error" id="status" role="alert" hidden></p>
+
+      <label>
+        <span>Your email</span>
+        <input type="email" name="email" required maxlength="254" autocomplete="email" />
+      </label>
+
+      <div class="row">
+        <label>
+          <span>Kind of issue</span>
+          <select name="category">
+            {categories.map((c) => <option>{c}</option>)}
+          </select>
+        </label>
+        <label>
+          <span>Swarm version</span>
+          <input type="text" name="swarm_version" value={VERSION} maxlength="40" />
+        </label>
+        <label>
+          <span>macOS version <em>optional</em></span>
+          <input type="text" name="macos_version" maxlength="40" placeholder="e.g. 26.1" />
+        </label>
+      </div>
+
+      <label>
+        <span>Summary</span>
+        <input type="text" name="summary" required maxlength="200" placeholder="One line: what went wrong" />
+      </label>
+
+      <label>
+        <span>What happened</span>
+        <textarea name="details" required maxlength="8000" rows="10"></textarea>
+      </label>
+
+      <label class="trap" aria-hidden="true">
+        <span>Leave this empty</span>
+        <input type="text" name="website" tabindex="-1" autocomplete="off" />
+      </label>
+
+      <div class="actions">
+        <button class="btn primary" type="submit">Send report</button>
+        <span class="dim">Or email <a href="mailto:info@swarm-term.com">info@swarm-term.com</a> directly.</span>
+      </div>
+    </form>
+  </div>
+</Base>
+
+<script>
+  const form = document.getElementById('report') as HTMLFormElement;
+  const status = document.getElementById('status') as HTMLParagraphElement;
+  const show = (text: string) => {
+    status.textContent = text;
+    status.hidden = false;
+  };
+
+  // Without JavaScript the form posts normally and the server redirects back here with ?error=.
+  const error = new URLSearchParams(location.search).get('error');
+  if (error) show(error);
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = form.querySelector('button') as HTMLButtonElement;
+    button.disabled = true;
+    button.textContent = 'Sending…';
+    status.hidden = true;
+    try {
+      const response = await fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form),
+        headers: { Accept: 'application/json' },
+      });
+      const result = await response.json().catch(() => ({}));
+      if (response.ok) {
+        location.assign('/report/sent/');
+        return;
+      }
+      show(result.error ?? "Your report couldn't be sent. Please email info@swarm-term.com instead.");
+    } catch {
+      show("Your report couldn't be sent. Check your connection, or email info@swarm-term.com instead.");
+    }
+    button.disabled = false;
+    button.textContent = 'Send report';
+  });
+</script>
+
+<style>
+  .report {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    gap: 56px;
+    padding-top: 64px;
+    padding-bottom: 96px;
+    align-items: start;
+  }
+
+  @media (max-width: 899px) {
+    .report {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 32px;
+      padding-top: 40px;
+    }
+  }
+
+  .intro {
+    display: grid;
+    gap: 16px;
+  }
+
+  .hint {
+    color: var(--ink-2);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  form {
+    display: grid;
+    gap: 18px;
+    padding: 28px;
+    background: var(--bg-raised);
+    border: 1px solid var(--line-strong);
+  }
+
+  @media (max-width: 599px) {
+    form {
+      padding: 20px 16px;
+    }
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  @media (max-width: 599px) {
+    .row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  label {
+    display: grid;
+    gap: 6px;
+  }
+
+  label > span {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-2);
+    text-transform: lowercase;
+  }
+
+  label em {
+    font-style: normal;
+    color: var(--ink-3);
+  }
+
+  input,
+  select,
+  textarea {
+    font: inherit;
+    font-size: 15px;
+    color: var(--ink);
+    background: var(--bg);
+    border: 1px solid var(--line-strong);
+    border-radius: 0;
+    padding: 10px 12px;
+    width: 100%;
+  }
+
+  textarea {
+    resize: vertical;
+    min-height: 180px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  input:focus,
+  select:focus,
+  textarea:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
+
+  .trap {
+    position: absolute;
+    left: -10000px;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 20px;
+  }
+
+  .actions .dim {
+    color: var(--ink-3);
+    font-size: 14px;
+  }
+
+  .status.error {
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid #d0454c;
+    color: #d0454c;
+    font-size: 14px;
+  }
+</style>

@@ -1,0 +1,29 @@
+---
+import Base from '../layouts/Base.astro';
+---
+
+<Base title="Not found — Swarm" description="This page doesn't exist.">
+  <section class="frame missing">
+    <p class="label"># 404 <span class="dim">[ not found ]</span></p>
+    <h1>No session by that name</h1>
+    <p class="lede">The page you asked for doesn't exist. It may have moved, or the link was mistyped.</p>
+    <pre class="term"><span class="p">$</span> swarmctl attach this-page
+<span class="d">error: no session matches "this-page"</span></pre>
+    <div><a class="btn primary" href="/">Go home</a></div>
+  </section>
+</Base>
+
+<style>
+  .missing {
+    padding-top: 96px;
+    padding-bottom: 120px;
+    display: grid;
+    gap: 24px;
+    justify-items: start;
+  }
+
+  .missing pre {
+    width: 100%;
+    max-width: 560px;
+  }
+</style>

@@ -1,3 +1,5 @@
 node_modules/
 .astro/
 dist/
+.wrangler/
+worker/worker-configuration.d.ts
