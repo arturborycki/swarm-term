@@ -3,8 +3,8 @@
 #   brew install --cask arturborycki/tap/swarm
 # Fill in `version` and `sha256` from scripts/make-dmg.sh for each release.
 cask "swarm" do
-  version "0.1.1"
-  sha256 "f580353a8d48b6529b0620ad2e93e0374e3792eff5ce6965d874f23604aeeec7"
+  version "0.1.2"
+  sha256 "d10158bd7068c809f20b4afaaa5052a61758c90cd877101a7259eeb69a43f898"
 
   url "https://github.com/arturborycki/swarm-term/releases/download/v#{version}/Swarm-#{version}.dmg"
   name "Swarm"
