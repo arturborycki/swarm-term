@@ -5,10 +5,7 @@ export const APP_REPO = 'https://github.com/arturborycki/swarm-app';
 /** While the repository is private, links into it are shown grayed out instead of leading to a 404. */
 export const REPO_PUBLIC = true;
 export const RELEASE = `${REPO}/releases/tag/v${VERSION}`;
-/**
- * The download link. worker/index.ts counts it, then redirects to the DMG in the Cloudflare R2
- * bucket behind downloads.swarm-term.com (scripts/upload-release.sh), not GitHub.
- */
+/** The download link. worker/index.ts counts it, then redirects to the DMG on the GitHub release. */
 export const DMG = `https://swarm-term.com/download/Swarm-${VERSION}.dmg`;
 /** Linux builds of swarmd, swarm-shim and swarmctl, for installing on a server by hand (scripts/make-linux-tarballs.sh). */
 export const linuxTarball = (arch: 'x86_64' | 'aarch64') =>

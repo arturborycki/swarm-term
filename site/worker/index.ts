@@ -1,5 +1,5 @@
 // The site's server code. Everything else is the static site in dist/.
-//   GET  /download/Swarm-<version>.dmg  counts a download, then redirects to R2
+//   GET  /download/Swarm-<version>.dmg  counts a download, then redirects to the GitHub release
 //   GET  /download/swarmd-<version>-linux-<arch>.tar.gz  the same, for the Linux daemon
 //   GET  /releases/latest.json          counts an installed Swarm's update check
 //   POST /api/report                    mails an issue report (nothing stored)
@@ -15,7 +15,8 @@ interface Env {
   REPORT_TO: string;
 }
 
-const DOWNLOADS = 'https://downloads.swarm-term.com';
+// Release files are assets of the GitHub release tagged v<version> (scripts/publish-release.sh).
+const RELEASES = 'https://github.com/arturborycki/swarm-term/releases/download';
 const TO = 'info@swarm-term.com';
 const FROM = 'reports@swarm-term.com';
 const CATEGORIES = ['Bug', 'Crash', 'Install or update', 'Remote hosts', 'Question or idea'];
@@ -42,7 +43,7 @@ export default {
       if (request.method === 'GET' && (app || !BOT_AGENT.test(agent))) {
         ctx.waitUntil(count(env, app ? 'update' : 'download', dmg[2], country));
       }
-      return Response.redirect(`${DOWNLOADS}/${dmg[1]}`, 302);
+      return Response.redirect(`${RELEASES}/v${dmg[2]}/${dmg[1]}`, 302);
     }
 
     const linux = url.pathname.match(LINUX);
@@ -50,7 +51,7 @@ export default {
       if (request.method === 'GET' && !CRAWLER_AGENT.test(agent)) {
         ctx.waitUntil(count(env, 'linux', linux[2], country));
       }
-      return Response.redirect(`${DOWNLOADS}/${linux[1]}`, 302);
+      return Response.redirect(`${RELEASES}/v${linux[2]}/${linux[1]}`, 302);
     }
 
     if (url.pathname === '/releases/latest.json') {
