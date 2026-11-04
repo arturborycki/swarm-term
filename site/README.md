@@ -18,14 +18,15 @@ npx wrangler login
 
 **Site (Cloudflare Workers static assets).** `scripts/deploy.sh` builds and uploads `dist/` to the Worker `swarm-term` (`wrangler.jsonc`: static files only, no server code; unknown paths get `404.html`). It serves `swarm-term.com` and `www.swarm-term.com` (custom domains in `wrangler.jsonc`; Cloudflare created the DNS records and certificate). `scripts/deploy.sh preview` uploads a version with its own preview URL and leaves the live site alone.
 
-**Downloads (Cloudflare R2).** The DMG is too big for static assets (25 MiB per file), so it lives in the R2 bucket `swarm-downloads`, served at `downloads.swarm-term.com`. R2 doesn't charge for downloads.
+**Downloads (GitHub Releases).** The download links are `swarm-term.com/download/<file>`: `worker/index.ts` counts them, then redirects to that file on the GitHub release `v<version>`. Releasing is attaching the files to the release; `scripts/publish-release.sh` (repository root) checks them, creates the release and deploys the site:
 
 ```bash
-npx wrangler r2 bucket create swarm-downloads
-npx wrangler r2 bucket domain add swarm-downloads --domain downloads.swarm-term.com --zone-id <swarm-term.com zone id>
 scripts/sign-update.sh             # signs dist/Swarm-<version>.dmg, records it in src/site.ts
-scripts/upload-release.sh          # uploads dist/Swarm-<version>.dmg from the repo root
+scripts/make-linux-tarballs.sh     # packs the Linux daemon, records its checksums in src/site.ts
+scripts/publish-release.sh         # GitHub release with all three files, then deploys the site
 ```
+
+Releases up to 0.1.3 were also uploaded to the R2 bucket `swarm-downloads` (`downloads.swarm-term.com`), which stays up for links that point there directly, such as 0.1.1's update feed.
 
 **Updates.** `/releases/latest.json` describes the current release in the same shape as GitHub's API, for the app's "Check for Updates…", plus the DMG's `sha256` and Ed25519 `signature` (`DMG_SHA256`, `DMG_SIGNATURE` in `src/site.ts`, written by `scripts/sign-update.sh`). The app installs an update itself only when that signature verifies with the release key built into it, so sign every release before deploying the site. The private key is `~/.config/swarm-term/update-signing-key.pem` on the release Mac; keep a backup.
 
