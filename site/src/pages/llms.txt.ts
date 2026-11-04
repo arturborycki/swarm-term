@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { DMG, VERSION } from '../site';
+import { APP_REPO, DMG, REPO, VERSION } from '../site';
 
 // llms.txt (https://llmstxt.org): a plain-text summary for AI assistants that answer questions
 // about Swarm.
@@ -17,6 +17,7 @@ export const GET: APIRoute = () =>
 - Command line: swarmctl ls, new, attach, rename, info, dump, kill and rm, locally or with --host <ssh host>.
 - Scrollback: 16 MB per session in memory, optionally more on disk, encrypted.
 - License: the app (a Warp fork) is AGPL-3.0; the daemon crates are MIT or Apache-2.0.
+- Source: ${REPO} (daemon, swarmctl, site) and ${APP_REPO} (the app).
 
 ## Docs
 
