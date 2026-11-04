@@ -1,11 +1,12 @@
 ---
 import Base from '../layouts/Base.astro';
-import { DMG, VERSION } from '../site';
+import { DMG, LINUX_SHA256_AARCH64, LINUX_SHA256_X86_64, VERSION, linuxTarball } from '../site';
 
 const toc = [
   ['install', 'Install'],
   ['sessions', 'Sessions and tabs'],
   ['remote', 'Remote hosts'],
+  ['server-install', 'Install on a server yourself'],
   ['scrollback', 'Scrollback'],
   ['swarmctl', 'swarmctl'],
   ['daemon', 'The daemon'],
@@ -62,6 +63,38 @@ const toc = [
       <p>
         Remote sessions live on the host. If your laptop sleeps or the network drops, the tabs show that they're
         reconnecting and pick up where they were.
+      </p>
+      <p>
+        When you update Swarm, it updates <code>swarmd</code> on each host the next time it connects. Running sessions
+        move to the new version without restarting.
+      </p>
+
+      <h2 id="server-install">Install on a server yourself</h2>
+      <p>
+        You don't have to: the app installs <code>swarmd</code> when you connect. Install it by hand to set servers up in
+        advance (with a script or configuration management) or to use <code>swarmctl</code> on a Linux machine. Both
+        builds are static and need no root; pick the one <code>uname -m</code> names.
+      </p>
+      <pre class="term">mkdir -p ~/.local/share/swarm/bin
+curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
+<span class="d"># ARM servers (aarch64): use swarmd-{VERSION}-linux-aarch64.tar.gz</span>
+~/.local/share/swarm/bin/swarmd --version</pre>
+      <ul class="files">
+        <li>
+          <a href={linuxTarball('x86_64')}>swarmd-{VERSION}-linux-x86_64.tar.gz</a>
+          <span>SHA-256 <code>{LINUX_SHA256_X86_64}</code></span>
+        </li>
+        <li>
+          <a href={linuxTarball('aarch64')}>swarmd-{VERSION}-linux-aarch64.tar.gz</a>
+          <span>SHA-256 <code>{LINUX_SHA256_AARCH64}</code></span>
+        </li>
+      </ul>
+      <p>
+        Each archive holds <code>swarmd</code>, <code>swarm-shim</code> and <code>swarmctl</code>. That folder is where the
+        app looks first and keeps up to date, so a server set up this way updates like any other. To use
+        <code>swarmctl</code> there, add the folder to your <code>PATH</code>. To start the daemon at login instead of
+        on first use, run <code>swarmctl daemon install-service</code> (a systemd user unit). For a macOS server, connect
+        from the app: it installs its own macOS build.
       </p>
 
       <h2 id="scrollback">Scrollback</h2>
@@ -174,6 +207,28 @@ const toc = [
 
   .prose {
     max-width: 720px;
+  }
+
+  .files {
+    list-style: none;
+    padding: 0;
+    display: grid;
+    gap: 10px;
+  }
+
+  .files li {
+    display: grid;
+    gap: 2px;
+  }
+
+  .files span {
+    color: var(--ink-3);
+    font-size: 13px;
+  }
+
+  .files code {
+    overflow-wrap: anywhere;
+    font-size: 12px;
   }
 
   .prose h1 {

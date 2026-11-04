@@ -1,5 +1,6 @@
 // The site's server code. Everything else is the static site in dist/.
 //   GET  /download/Swarm-<version>.dmg  counts a download, then redirects to R2
+//   GET  /download/swarmd-<version>-linux-<arch>.tar.gz  the same, for the Linux daemon
 //   GET  /releases/latest.json          counts an installed Swarm's update check
 //   POST /api/report                    mails an issue report (nothing stored)
 //   POST /api/subscribe                 adds an address to the release-news list
@@ -20,9 +21,12 @@ const FROM = 'reports@swarm-term.com';
 const CATEGORIES = ['Bug', 'Crash', 'Install or update', 'Remote hosts', 'Question or idea'];
 const MAX_TEXT = 8000;
 const DMG = /^\/download\/(Swarm-(\d+\.\d+\.\d+)\.dmg)$/;
+const LINUX = /^\/download\/(swarmd-(\d+\.\d+\.\d+)-linux-(?:x86_64|aarch64)\.tar\.gz)$/;
 // Installed apps identify themselves as `Swarm/<version>` (app/src/swarm/updates.rs).
 const APP_AGENT = /^Swarm\/(\d+\.\d+\.\d+)/;
 const BOT_AGENT = /bot|crawl|spider|slurp|preview|monitor|curl|wget|python|headless/i;
+// Linux archives are usually fetched with curl or wget, so only crawlers are left out.
+const CRAWLER_AGENT = /bot|crawl|spider|slurp|preview|monitor/i;
 
 type Reply = (status: number, error?: string) => Response;
 
@@ -39,6 +43,14 @@ export default {
         ctx.waitUntil(count(env, app ? 'update' : 'download', dmg[2], country));
       }
       return Response.redirect(`${DOWNLOADS}/${dmg[1]}`, 302);
+    }
+
+    const linux = url.pathname.match(LINUX);
+    if (linux) {
+      if (request.method === 'GET' && !CRAWLER_AGENT.test(agent)) {
+        ctx.waitUntil(count(env, 'linux', linux[2], country));
+      }
+      return Response.redirect(`${DOWNLOADS}/${linux[1]}`, 302);
     }
 
     if (url.pathname === '/releases/latest.json') {

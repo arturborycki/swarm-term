@@ -56,6 +56,17 @@ if [ -n "$UNIVERSAL" ]; then
     mv "$APP/Contents/MacOS/swarm.universal" "$APP/Contents/MacOS/swarm"
 fi
 if [ -d "$ROOT/target/linux" ]; then
+    # The app installs and updates swarmd on Linux hosts from these, and won't
+    # update a host from a build that isn't its own: a release with stale ones
+    # leaves every host on the old daemon.
+    WANT="$("$ROOT/target/$PROFILE/swarmd" --version | awk '{print $2}')"
+    for dir in "$ROOT"/target/linux/*/; do
+        if ! grep -aq "$WANT" "$dir/swarmd"; then
+            msg="$dir is from another build than $WANT (run scripts/build-linux.sh)"
+            [ "$PROFILE" = release ] && { echo "error: $msg" >&2; exit 1; }
+            echo "note: $msg" >&2
+        fi
+    done
     mkdir -p "$APP/Contents/Resources/swarmd"
     cp -R "$ROOT/target/linux/." "$APP/Contents/Resources/swarmd/"
 else

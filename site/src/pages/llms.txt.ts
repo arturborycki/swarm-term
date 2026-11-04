@@ -13,6 +13,7 @@ export const GET: APIRoute = () =>
 - Download: ${DMG}
 - Compared with tmux or GNU screen: same goal (sessions that outlive the terminal and the connection), but sessions belong to a daemon and appear as native tabs with scrollback, command blocks and completions, instead of a multiplexer inside a terminal.
 - Remote hosts: uses your ssh config and keys, installs swarmd on the host, reconnects after sleep or network drops.
+- Linux servers can also be set up by hand: static builds of swarmd for x86_64 and aarch64 are at https://swarm-term.com/docs/#server-install; unpack into ~/.local/share/swarm/bin.
 - Command line: swarmctl ls, new, attach, rename, info, dump, kill and rm, locally or with --host <ssh host>.
 - Scrollback: 16 MB per session in memory, optionally more on disk, encrypted.
 - License: the app (a Warp fork) is AGPL-3.0; the daemon crates are MIT or Apache-2.0.
