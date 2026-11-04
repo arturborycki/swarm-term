@@ -1,0 +1,55 @@
+---
+import Base from '../../layouts/Base.astro';
+import NewsSignup from '../../components/NewsSignup.astro';
+---
+
+<Base title="Release news — Swarm" description="Get an email when a new version of Swarm, the macOS terminal with persistent sessions, is released. Optional, a few emails a year.">
+  <section class="frame news-page">
+    <p class="label"># news <span class="dim">[ optional ]</span></p>
+    <h1>Hear about new versions</h1>
+    <p class="lede">
+      Leave your email and we'll write when a new version of Swarm is out: what changed, and anything you need to know
+      before updating. A few emails a year, nothing else. Swarm also tells you about updates itself, so this is
+      entirely optional.
+    </p>
+    <p class="status" id="news-error" role="alert" hidden></p>
+    <NewsSignup source="news-page" heading={false} />
+    <p class="small">
+      To unsubscribe, reply to any news email or write to <a href="mailto:info@swarm-term.com">info@swarm-term.com</a>.
+      See <a href="/privacy/">privacy</a> for what we keep.
+    </p>
+  </section>
+</Base>
+
+<script>
+  // Without JavaScript the form posts normally and the server redirects back here with ?error=.
+  const error = new URLSearchParams(location.search).get('error');
+  const status = document.getElementById('news-error');
+  if (error && status) {
+    status.textContent = error;
+    status.hidden = false;
+  }
+</script>
+
+<style>
+  .news-page {
+    padding-top: 96px;
+    padding-bottom: 120px;
+    display: grid;
+    gap: 20px;
+    justify-items: start;
+  }
+
+  .small {
+    color: var(--ink-2);
+    font-size: 14px;
+  }
+
+  .status {
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid #d0454c;
+    color: #d0454c;
+    font-size: 14px;
+  }
+</style>

@@ -1,0 +1,121 @@
+---
+// The optional release-news signup. Posts to /api/subscribe (worker/index.ts); without
+// JavaScript the server redirects to /news/subscribed/ or back to /news/ with ?error=.
+interface Props {
+  /** Where on the site the signup was, stored with the address. */
+  source: string;
+  /** Show the field label as a heading line above the form. */
+  heading?: boolean;
+}
+const { source, heading = true } = Astro.props;
+---
+
+<form class="news" method="post" action="/api/subscribe" data-news>
+  {heading && <p class="news-head">release news <span class="dim">· optional</span></p>}
+  <div class="news-row">
+    <label class="sr-only" for={`news-${source}`}>Email for release news</label>
+    <input id={`news-${source}`} type="email" name="email" required maxlength="254" autocomplete="email" placeholder="you@example.com" />
+    <button class="btn small" type="submit">Subscribe</button>
+  </div>
+  <input type="hidden" name="source" value={source} />
+  <label class="news-trap" aria-hidden="true">Leave this empty <input type="text" name="website" tabindex="-1" autocomplete="off" /></label>
+  <p class="news-note" data-news-status>New versions only, a few times a year. <a href="/privacy/">Privacy</a>.</p>
+</form>
+
+<script>
+  document.querySelectorAll<HTMLFormElement>('form[data-news]').forEach((form) => {
+    const status = form.querySelector<HTMLParagraphElement>('[data-news-status]')!;
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button')!;
+      button.disabled = true;
+      try {
+        const response = await fetch(form.action, {
+          method: 'POST',
+          body: new FormData(form),
+          headers: { Accept: 'application/json' },
+        });
+        const result = await response.json().catch(() => ({}));
+        if (response.ok) {
+          form.reset();
+          status.textContent = "Thanks, you're on the list. We'll write when there's a new version.";
+          status.classList.remove('error');
+        } else {
+          status.textContent = result.error ?? "That didn't work. Please try again.";
+          status.classList.add('error');
+        }
+      } catch {
+        status.textContent = "That didn't work. Check your connection and try again.";
+        status.classList.add('error');
+      }
+      button.disabled = false;
+    });
+  });
+</script>
+
+<style>
+  .news {
+    display: grid;
+    gap: 8px;
+    max-width: 380px;
+  }
+
+  .news-head {
+    margin: 0;
+    color: var(--ink-3);
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+
+  .news-head .dim {
+    color: var(--ink-3);
+    opacity: 0.7;
+  }
+
+  .news-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .news input[type='email'] {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-family: var(--sans);
+    font-size: 14px;
+    color: var(--ink);
+    background: var(--bg-raised);
+    border: 1px solid var(--line-strong);
+    border-radius: 0;
+    padding: 8px 10px;
+  }
+
+  .news input[type='email']:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
+
+  .news-note {
+    margin: 0;
+    color: var(--ink-3);
+    font-family: var(--sans);
+    font-size: 12px;
+  }
+
+  .news-note a {
+    color: inherit;
+  }
+
+  .news-note.error {
+    color: #d0454c;
+  }
+
+  .news-trap,
+  .sr-only {
+    position: absolute;
+    left: -10000px;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+  }
+</style>
