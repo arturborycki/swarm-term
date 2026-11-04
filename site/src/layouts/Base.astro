@@ -7,7 +7,7 @@ import '../styles/global.css';
 import Hive from '../components/Hive.astro';
 import NewsSignup from '../components/NewsSignup.astro';
 import RepoLink from '../components/RepoLink.astro';
-import { DMG, VERSION } from '../site';
+import { APP_REPO, DMG, REPO_PUBLIC, VERSION } from '../site';
 
 interface Props {
   title: string;
@@ -102,8 +102,9 @@ const nav = [
         <div>
           <p class="head">project</p>
           <RepoLink>github</RepoLink>
+          {REPO_PUBLIC && <a href={APP_REPO}>app source</a>}
           <RepoLink path="/blob/main/docs/DESIGN.md">design</RepoLink>
-          <RepoLink path="/blob/main/docs/DESIGN.md#10-security">security</RepoLink>
+          <RepoLink path="/blob/main/SECURITY.md">security</RepoLink>
         </div>
         <div>
           <p class="head">help</p>
@@ -114,7 +115,7 @@ const nav = [
       </div>
       <div class="frame legal">
         <span>© 2026 swarm-term</span>
-        <span>app: AGPL-3.0 · daemon: MIT or Apache-2.0</span>
+        <span>app: AGPL-3.0 · daemon: MIT or Apache-2.0 · open source on GitHub</span>
       </div>
     </footer>
 

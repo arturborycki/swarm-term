@@ -2,7 +2,7 @@
 import { Image } from 'astro:assets';
 import Base from '../layouts/Base.astro';
 import hero from '../assets/hero.png';
-import { DMG, VERSION, linuxTarball } from '../site';
+import { APP_REPO, DMG, REPO, VERSION, linuxTarball } from '../site';
 
 const features = [
   {
@@ -79,6 +79,7 @@ const software = {
   image: 'https://swarm-term.com/og.png',
   offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
   featureList: features.map((f) => f.title),
+  sameAs: [REPO, APP_REPO],
 };
 
 const faqPage = {

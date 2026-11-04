@@ -1,7 +1,9 @@
 export const VERSION = '0.1.3';
 export const REPO = 'https://github.com/arturborycki/swarm-term';
+/** The app's source: the Warp fork (AGPL-3.0). */
+export const APP_REPO = 'https://github.com/arturborycki/swarm-app';
 /** While the repository is private, links into it are shown grayed out instead of leading to a 404. */
-export const REPO_PUBLIC = false;
+export const REPO_PUBLIC = true;
 export const RELEASE = `${REPO}/releases/tag/v${VERSION}`;
 /**
  * The download link. worker/index.ts counts it, then redirects to the DMG in the Cloudflare R2
