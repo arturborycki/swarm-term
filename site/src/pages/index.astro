@@ -2,7 +2,7 @@
 import { Image } from 'astro:assets';
 import Base from '../layouts/Base.astro';
 import hero from '../assets/hero.png';
-import { DMG, VERSION } from '../site';
+import { DMG, VERSION, linuxTarball } from '../site';
 
 const features = [
   {
@@ -211,17 +211,37 @@ const faqPage = {
 
   <section class="section cta">
     <div class="frame">
-      <p class="label"># get it</p>
-      <h2>Swarm {VERSION} for macOS</h2>
-      <p class="lede">Universal app for Apple silicon and Intel, macOS 13 Ventura or later. Remote hosts can be Linux or macOS.</p>
-      <div class="actions">
-        <a class="btn primary" href={DMG}>Download Swarm-{VERSION}.dmg</a>
-        <a class="btn" href="/changelog/">What's new</a>
+      <p class="label"># get it <span class="dim">[ v{VERSION} ]</span></p>
+      <h2 id="download">Download Swarm {VERSION}</h2>
+      <div class="downloads">
+        <article class="dl">
+          <p class="dl-kind">the app <span class="dim">· macOS</span></p>
+          <h3>Swarm for Mac</h3>
+          <p>Universal app for Apple silicon and Intel, macOS 13 Ventura or later. Signed and notarized by Apple, and it installs its own updates.</p>
+          <div class="actions">
+            <a class="btn primary" href={DMG}>Download Swarm-{VERSION}.dmg</a>
+            <a class="btn" href="/changelog/">What's new</a>
+          </div>
+        </article>
+        <article class="dl">
+          <p class="dl-kind">the server <span class="dim">· linux</span></p>
+          <h3>swarmd for Linux servers</h3>
+          <p>
+            Optional: the app installs <code>swarmd</code> on a server when you connect. Download it to set servers up
+            yourself or to use <code>swarmctl</code> on Linux. Static builds, no root needed.
+          </p>
+          <div class="actions">
+            <a class="btn" href={linuxTarball('x86_64')}>x86_64 .tar.gz</a>
+            <a class="btn" href={linuxTarball('aarch64')}>aarch64 (ARM) .tar.gz</a>
+          </div>
+          <div class="cmd small">
+            <span class="prompt">$</span>
+            <code>curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin</code>
+            <button class="copy" data-copy={`mkdir -p ~/.local/share/swarm/bin && curl -fsSL ${linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin`}>copy</button>
+          </div>
+          <a class="more" href="/docs/#server-install">Install instructions and checksums →</a>
+        </article>
       </div>
-      <p class="note">
-        Signed and notarized by Apple. Swarm installs its own updates when you choose Install and Restart; your
-        sessions keep running.
-      </p>
     </div>
   </section>
 </Base>
@@ -535,6 +555,75 @@ const faqPage = {
   .cta .frame {
     display: grid;
     gap: 20px;
+  }
+
+  .downloads {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px;
+  }
+
+  @media (max-width: 899px) {
+    .downloads {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  .dl {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    align-content: start;
+    padding: 28px;
+    background: var(--bg-raised);
+    border: 1px solid var(--line-strong);
+    min-width: 0;
+  }
+
+  @media (max-width: 599px) {
+    .dl {
+      padding: 20px 16px;
+    }
+  }
+
+  .dl h3 {
+    margin: 0;
+    font-size: 22px;
+  }
+
+  .dl > p {
+    margin: 0;
+    color: var(--ink-2);
+  }
+
+  .dl-kind {
+    font-family: var(--mono);
+    font-size: 12px;
+    text-transform: lowercase;
+    color: var(--ink-3) !important;
+  }
+
+  .dl .cmd.small {
+    max-width: 100%;
+    background: var(--bg);
+  }
+
+  .dl .cmd.small code {
+    min-width: 0;
+    font-size: 12px;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  .more {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .more:hover {
+    text-decoration: underline;
   }
 
   .note {
