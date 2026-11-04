@@ -31,6 +31,10 @@ scripts/upload-release.sh          # uploads dist/Swarm-<version>.dmg from the r
 
 **Issue reports.** `/report/` is a form that `worker/index.ts` (the only server code; it runs for `/api/*`) emails to info@swarm-term.com through Email Routing's `send_email` binding, with the reporter as Reply-To. A Worker may only mail verified destinations, so it delivers to the address info@ forwards to, set once with `npx wrangler secret put REPORT_TO`. Nothing is stored. A hidden honeypot field drops bots, and the Workers rate limiter allows 3 sent reports per minute per address. Email Routing forwards info@ to the account's verified address. `npx wrangler types worker/worker-configuration.d.ts` regenerates the binding types after changing `wrangler.jsonc`; `npx wrangler dev` runs the Worker locally and saves sent mail under `.wrangler/tmp/email/` instead of sending it.
 
+**Counts and release news (D1).** The database `swarm-site` (`migrations/`, applied with `npx wrangler d1 migrations apply swarm-site --remote`) holds daily totals and the news list; nothing identifies a visitor. `worker/index.ts` adds 1 for each site download (`/download/Swarm-<version>.dmg`, which then redirects to R2; bots skipped), each update an installed Swarm downloads, and each update check (`/releases/latest.json` read by `Swarm/<version>`, about once per launch and per day, so it tracks copies in use). The optional signup in the footer and on `/news/` stores an address in `subscribers`. `scripts/stats.sh [days]` prints the totals; `scripts/stats.sh subscribers` prints the list as CSV.
+
+**Search.** Every page has a canonical URL, Open Graph and Twitter tags, and JSON-LD (`WebSite`; the home page adds `SoftwareApplication` and an `FAQPage` matching its visible FAQ). `robots.txt` allows everything but `/api/`, with Cloudflare content signals allowing search and AI use; `sitemap.xml` and `llms.txt` (a summary for AI assistants) are generated from `src/pages/`. Confirmation and error pages are `noindex`.
+
 **Going public later.** Set `REPO_PUBLIC = true` in `src/site.ts` to turn the grayed-out GitHub links back on.
 
 ## Updating

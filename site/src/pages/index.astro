@@ -36,18 +36,70 @@ const features = [
     body: 'swarmctl lists, attaches, renames and dumps sessions, on this Mac or on any host you can ssh to.',
   },
 ];
+
+const faq = [
+  {
+    q: 'Is Swarm a tmux alternative?',
+    a: 'It solves the same problem, sessions that survive closing the terminal or losing the connection, without a multiplexer inside your terminal. Each session belongs to a background daemon, swarmd, and Swarm shows it as a native tab with its own scrollback, command blocks and completions. You can still run tmux inside a Swarm session if you like.',
+  },
+  {
+    q: 'What happens to my sessions when I quit Swarm?',
+    a: 'They keep running. Shells, builds and servers belong to swarmd, not to the app, so quitting Swarm, closing the window or updating it leaves them alone. When you open Swarm again, each tab reattaches with its output.',
+  },
+  {
+    q: 'Does Swarm keep SSH sessions alive on remote servers?',
+    a: 'Yes. Swarm connects to Linux and macOS hosts through your own ssh configuration and keys, installs its daemon there, and runs your sessions on the server. If your Mac sleeps or the network drops, the sessions keep running and Swarm reconnects to them.',
+  },
+  {
+    q: 'Can I use it from the command line or in scripts?',
+    a: 'Yes. swarmctl lists, starts, attaches to, renames, dumps and ends sessions, on this Mac or on any host with --host.',
+  },
+  {
+    q: 'Is Swarm free, and what does it need?',
+    a: `Swarm is a free download for macOS 13 Ventura or later, on Apple silicon and Intel. The app is signed and notarized by Apple and updates itself. Remote hosts can run Linux or macOS. The current version is ${VERSION}.`,
+  },
+  {
+    q: 'Is Swarm based on Warp?',
+    a: 'Swarm is built on Warp’s open-source terminal engine, so it has Warp’s command blocks and input editor. It needs no Warp account or Warp cloud services, and adds what Warp doesn’t have: sessions owned by a daemon that outlive the app, on your Mac and on servers.',
+  },
+];
+
+const software = {
+  '@type': 'SoftwareApplication',
+  name: 'Swarm',
+  alternateName: 'swarm-term',
+  description:
+    'A macOS terminal where every tab is a persistent session owned by a background daemon, on your Mac or on a remote server over SSH.',
+  url: 'https://swarm-term.com/',
+  applicationCategory: 'DeveloperApplication',
+  applicationSubCategory: 'Terminal emulator',
+  operatingSystem: 'macOS 13 or later',
+  softwareVersion: VERSION,
+  downloadUrl: DMG,
+  image: 'https://swarm-term.com/og.png',
+  offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+  featureList: features.map((f) => f.title),
+};
+
+const faqPage = {
+  '@type': 'FAQPage',
+  mainEntity: faq.map(({ q, a }) => ({ '@type': 'Question', name: q, acceptedAnswer: { '@type': 'Answer', text: a } })),
+};
+
 ---
 
 <Base
-  title="Swarm — the terminal whose sessions outlive the window"
-  description="Swarm is a macOS terminal where every tab is a long-lived session owned by a background daemon, on your Mac or on a remote server."
+  title="Swarm — macOS terminal with persistent sessions, local and over SSH"
+  description="Swarm is a free macOS terminal with persistent sessions. Quit the app or lose Wi-Fi and your shells, builds and SSH sessions keep running, like tmux, in native tabs."
+  jsonLd={[software, faqPage]}
 >
   <section class="hero frame">
     <p class="label"><span class="live">●</span> v{VERSION} <span class="dim">·</span> macOS 13+ <span class="dim">·</span> apple silicon + intel</p>
     <h1>Close the window.<br />The work keeps <span class="accent">running<span class="cursor" aria-hidden="true"></span></span></h1>
     <p class="lede">
-      Swarm is a terminal where every tab is a session owned by a small background daemon, on your Mac or on a
-      server. Quit the app, lose Wi-Fi, update it: your shells, builds and servers are still there when you come back.
+      Swarm is a macOS terminal with persistent sessions: every tab is owned by a small background daemon, on your Mac
+      or on a server over SSH. Quit the app, lose Wi-Fi, update it: your shells, builds and servers are still there
+      when you come back.
     </p>
     <div class="actions">
       <a class="btn primary" href={DMG}>
@@ -139,6 +191,21 @@ const features = [
 <span class="d">[ctrl-\ detaches; the build keeps going]</span>
 
 <span class="p">$</span> swarmctl dump release &gt; build.log</pre>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="frame">
+      <p class="label"># faq <span class="dim">[ {faq.length} ]</span></p>
+      <h2>Questions</h2>
+      <div class="faq">
+        {faq.map(({ q, a }) => (
+          <details>
+            <summary>{q}</summary>
+            <p>{a}</p>
+          </details>
+        ))}
+      </div>
     </div>
   </section>
 
@@ -306,6 +373,47 @@ const features = [
     .links span:last-child {
       display: none;
     }
+  }
+
+  .faq {
+    margin-top: 32px;
+    border-top: 1px solid var(--line-strong);
+    max-width: 880px;
+  }
+
+  .faq details {
+    border-bottom: 1px solid var(--line-strong);
+  }
+
+  .faq summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 18px 0;
+    font-size: 17px;
+    font-weight: 500;
+  }
+
+  .faq summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .faq summary::after {
+    content: '+';
+    font-family: var(--mono);
+    color: var(--ink-3);
+  }
+
+  .faq details[open] summary::after {
+    content: '−';
+  }
+
+  .faq details p {
+    margin: 0 0 20px;
+    color: var(--ink-2);
+    max-width: 720px;
   }
 
   .cell {

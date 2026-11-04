@@ -1,0 +1,22 @@
+---
+import Base from '../../layouts/Base.astro';
+---
+
+<Base title="Subscribed — Swarm" description="You're on the Swarm release-news list." noindex>
+  <section class="frame done">
+    <p class="label"># news <span class="dim">[ subscribed ]</span></p>
+    <h1>Thanks, you're on the list</h1>
+    <p class="lede">We'll write when there's a new version of Swarm. To unsubscribe, reply to any news email.</p>
+    <div><a class="btn primary" href="/">Home</a></div>
+  </section>
+</Base>
+
+<style>
+  .done {
+    padding-top: 96px;
+    padding-bottom: 120px;
+    display: grid;
+    gap: 20px;
+    justify-items: start;
+  }
+</style>

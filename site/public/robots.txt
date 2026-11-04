@@ -1,0 +1,8 @@
+# swarm-term.com: everything is public. Search engines and AI assistants may
+# index it and use it to answer questions about Swarm.
+User-agent: *
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
+Allow: /
+Disallow: /api/
+
+Sitemap: https://swarm-term.com/sitemap.xml
