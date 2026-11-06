@@ -7,8 +7,27 @@
 set -euo pipefail
 SITE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SITE"
+# Prints the query's JSON. Retries once, because the first call after a Cloudflare
+# login expires can fail while wrangler refreshes it.
+d1() {
+    local out attempt
+    for attempt in 1 2; do
+        out="$(npx wrangler d1 execute swarm-site --remote --json --command "$1" 2>&1)" || true
+        if printf '%s' "$out" | node -e 'const r=JSON.parse(require("fs").readFileSync(0,"utf8"));
+                 process.exit(Array.isArray(r)&&r[0]&&r[0].results?0:1)' 2>/dev/null; then
+            printf '%s' "$out"
+            return
+        fi
+    done
+    echo "couldn't read the database (is \`npx wrangler login\` current?):" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+}
+
 query() {
-    npx wrangler d1 execute swarm-site --remote --json --command "$1" 2>/dev/null |
+    local out
+    out="$(d1 "$1")" || exit 1
+    printf '%s' "$out" |
         node -e 'const r=JSON.parse(require("fs").readFileSync(0,"utf8"))[0].results;
                  if(!r.length){console.log("  (none)");process.exit()}
                  const k=Object.keys(r[0]);console.log("  "+k.join("\t"));
@@ -16,8 +35,8 @@ query() {
 }
 
 if [ "${1:-}" = subscribers ]; then
-    npx wrangler d1 execute swarm-site --remote --json \
-        --command "SELECT email, created_at, source FROM subscribers WHERE unsubscribed_at IS NULL ORDER BY created_at" 2>/dev/null |
+    out="$(d1 "SELECT email, created_at, source FROM subscribers WHERE unsubscribed_at IS NULL ORDER BY created_at")" || exit 1
+    printf '%s' "$out" |
         node -e 'const r=JSON.parse(require("fs").readFileSync(0,"utf8"))[0].results;
                  console.log("email,subscribed,source");for(const x of r)console.log([x.email,x.created_at,x.source].join(","))'
     exit

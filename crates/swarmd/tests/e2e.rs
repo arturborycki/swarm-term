@@ -170,6 +170,25 @@ async fn read_for(att: &mut Attachment, dur: Duration) -> String {
 }
 
 #[tokio::test]
+async fn daemon_started_through_a_symlink_finds_its_shim() {
+    let dir = tempfile::Builder::new().prefix("sw").tempdir_in("/tmp").unwrap();
+    let link = dir.path().join("swarmd");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_swarmd"), &link).unwrap();
+    let swarmd = |arg: &str| {
+        Command::new(&link)
+            .arg(arg)
+            .env("SWARM_RUNTIME_DIR", dir.path().join("run"))
+            .env("SWARM_STATE_DIR", dir.path().join("state"))
+            .env_remove("SWARM_SHIM_PATH")
+            .output()
+            .unwrap()
+    };
+    let started = swarmd("start");
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    assert!(swarmd("stop").status.success());
+}
+
+#[tokio::test]
 async fn create_attach_detach_and_replay() {
     let env = Env::new().await;
     let c = env.client().await;

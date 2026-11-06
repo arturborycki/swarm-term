@@ -10,8 +10,10 @@
 #      with SWARM_SIGN_IDENTITY and SWARM_NOTARY_PROFILE (see its header).
 #   3. scripts/make-linux-tarballs.sh and scripts/sign-update.sh, which record the checksums
 #      and the update signature in site/src/site.ts.
-#   4. Write dist/RELEASE_NOTES-<version>.md, commit, tag v<version> in swarm-term and in
-#      app/ (swarm-app), and push both.
+#   4. Write dist/RELEASE_NOTES-<version>.md. Merge the changes through pull requests in
+#      swarm-term and app/ (swarm-app), then tag v<version> on each and push the tags.
+#
+# Afterwards, scripts/update-homebrew.sh updates packaging/homebrew/.
 #
 # Usage: scripts/publish-release.sh
 set -euo pipefail
