@@ -8,7 +8,8 @@ const CRATES: [&str; 5] = ["swarm-proto", "swarm-client", "swarm-shim", "swarmd"
 
 fn main() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
-    let mut files: Vec<PathBuf> = vec![crates.parent().unwrap().join("Cargo.lock")];
+    let root = crates.parent().unwrap();
+    let mut files: Vec<PathBuf> = vec![root.join("Cargo.lock")];
     for name in CRATES {
         let dir = crates.join(name);
         println!("cargo:rerun-if-changed={}", dir.join("src").display());
@@ -21,7 +22,8 @@ fn main() {
     // FNV-1a: stable across Rust versions, unlike std's hasher.
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for file in &files {
-        let rel = file.strip_prefix(&crates).unwrap_or(file).to_string_lossy().replace('\\', "/");
+        // Relative, so the ID doesn't depend on where the checkout is.
+        let rel = file.strip_prefix(root).unwrap_or(file).to_string_lossy().replace('\\', "/");
         for byte in rel.bytes().chain([0]).chain(std::fs::read(file).unwrap_or_default()).chain([0]) {
             hash ^= byte as u64;
             hash = hash.wrapping_mul(0x0100_0000_01b3);

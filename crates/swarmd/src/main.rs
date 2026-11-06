@@ -155,7 +155,8 @@ fn shim_exe() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("SWARM_SHIM_PATH") {
         return Ok(PathBuf::from(p));
     }
-    let exe = std::env::current_exe()?;
+    // Through a link (Homebrew's bin, a PATH symlink) the shim is next to the real file.
+    let exe = std::env::current_exe()?.canonicalize()?;
     let sibling = exe.with_file_name("swarm-shim");
     if sibling.exists() {
         return Ok(sibling);

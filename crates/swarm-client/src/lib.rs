@@ -405,7 +405,8 @@ pub fn daemon_exe() -> PathBuf {
     if let Some(p) = std::env::var_os("SWARM_DAEMON_PATH") {
         return PathBuf::from(p);
     }
-    if let Ok(exe) = std::env::current_exe() {
+    // Through a link (Homebrew's bin, a PATH symlink) swarmd is next to the real file.
+    if let Ok(exe) = std::env::current_exe().and_then(|exe| exe.canonicalize()) {
         let sibling = exe.with_file_name("swarmd");
         if sibling.exists() {
             return sibling;
