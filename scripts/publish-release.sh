@@ -50,7 +50,7 @@ check_tag() { # <repo dir> <branch> <file with the version> <name>
         fail "tag $TAG isn't pushed to $4"
     git -C "$1" merge-base --is-ancestor "$TAG^{commit}" "origin/$2" ||
         fail "$4's tag $TAG isn't on its $2 branch: merge the pull request, then move the tag"
-    git -C "$1" show "$TAG:$3" | grep -q "^version = \"$VERSION\"$" ||
+    git -C "$1" show "$TAG:$3" | grep "^version = \"$VERSION\"$" >/dev/null ||
         fail "$4's tag $TAG isn't at version $VERSION: merge the pull request, then move the tag"
 }
 check_tag "$ROOT" main Cargo.toml swarm-term
