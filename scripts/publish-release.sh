@@ -44,10 +44,17 @@ for arch in x86_64 aarch64; do
     ASSETS+=("$tarball")
 done
 git -C "$ROOT" diff --quiet HEAD -- site || fail "site/ has uncommitted changes: commit and push them first"
-git -C "$ROOT" ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null ||
-    fail "tag $TAG isn't pushed to swarm-term"
-git -C "$ROOT/app" ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null ||
-    echo "note: tag $TAG isn't pushed to swarm-app; the release notes link to it" >&2
+# The tag must exist on GitHub, be on the merged branch and hold this version.
+check_tag() { # <repo dir> <branch> <file with the version> <name>
+    git -C "$1" fetch -q origin "refs/heads/$2:refs/remotes/origin/$2" "+refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null ||
+        fail "tag $TAG isn't pushed to $4"
+    git -C "$1" merge-base --is-ancestor "$TAG^{commit}" "origin/$2" ||
+        fail "$4's tag $TAG isn't on its $2 branch: merge the pull request, then move the tag"
+    git -C "$1" show "$TAG:$3" | grep -q "^version = \"$VERSION\"$" ||
+        fail "$4's tag $TAG isn't at version $VERSION: merge the pull request, then move the tag"
+}
+check_tag "$ROOT" main Cargo.toml swarm-term
+check_tag "$ROOT/app" swarm app/Cargo.toml swarm-app
 gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && fail "release $TAG already exists"
 
 echo "Creating the GitHub release $TAG"

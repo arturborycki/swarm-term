@@ -5,8 +5,8 @@
 class Swarmd < Formula
   desc "Daemon and CLI for persistent terminal sessions, locally and over SSH"
   homepage "https://swarm-term.com/"
-  url "https://github.com/arturborycki/swarm-term/archive/refs/tags/v0.1.3.tar.gz"
-  sha256 "b7277d115bbc27f9eb699504f500cd017df5b74195b5576c994d785a039035d7"
+  url "https://github.com/arturborycki/swarm-term/archive/refs/tags/v0.1.4.tar.gz"
+  sha256 "cf31cfcdc0398a8a08131cea2ef06ff099396b42a5137f240e6ee0c6fa38042d"
   license any_of: ["MIT", "Apache-2.0"]
   head "https://github.com/arturborycki/swarm-term.git", branch: "main"
 
