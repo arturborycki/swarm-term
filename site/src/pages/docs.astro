@@ -57,8 +57,12 @@ const toc = [
       <h2 id="remote">Remote hosts</h2>
       <p>
         Click <strong>Connect…</strong> in the sidebar and pick a host from your <code>~/.ssh/config</code>, or type
-        <code>user@host[:port]</code>. Swarm connects with your own ssh setup (keys, agent, jump hosts) and installs
-        <code>swarmd</code> on the host if it isn't there. Hosts can run Linux or macOS.
+        <code>user@host[:port]</code>. Swarm connects with your own ssh setup (keys, agent, jump hosts) and offers to
+        install <code>swarmd</code> on the host if it isn't there. Hosts can run Linux or macOS.
+      </p>
+      <p>
+        Once connected, Swarm shows the host's sessions, or opens a new session if it has none. Clicking a host in the
+        session picker does the same.
       </p>
       <p>
         Remote sessions live on the host. If your laptop sleeps or the network drops, the tabs show that they're
@@ -67,6 +71,10 @@ const toc = [
       <p>
         When you update Swarm, it updates <code>swarmd</code> on each host the next time it connects. Running sessions
         move to the new version without restarting.
+      </p>
+      <p>
+        On a Linux host, sessions end when you log out of it unless lingering is on. To keep them running, run
+        <code>loginctl enable-linger</code> on the host once.
       </p>
 
       <h2 id="server-install">Install on a server yourself</h2>
@@ -146,6 +154,8 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
       <dl>
         <dt>macOS says Swarm can't be opened</dt>
         <dd>Versions before 0.1.2 aren't notarized: allow them once in System Settings → Privacy &amp; Security → Open Anyway, or install the current version.</dd>
+        <dt>A host refuses my SSH login</dt>
+        <dd>Swarm signs in with SSH keys and never asks for a password itself. If the host accepts passwords, click <strong>Open in Terminal</strong> in the error: a new tab sets your key up, and you type the host's password into ssh there. If it accepts only keys, run <code>ssh-add</code> or ask its administrator to add your public key (<code>~/.ssh/*.pub</code>).</dd>
         <dt>A remote tab keeps reconnecting</dt>
         <dd>Check that <code>ssh &lt;host&gt;</code> works without a password prompt from a terminal; Swarm uses the same configuration.</dd>
         <dt>A session I closed is gone from the tabs</dt>
