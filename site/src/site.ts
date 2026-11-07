@@ -1,4 +1,4 @@
-export const VERSION = '0.1.4';
+export const VERSION = '0.1.5';
 export const REPO = 'https://github.com/arturborycki/swarm-term';
 /** The app's source: the Warp fork (AGPL-3.0). */
 export const APP_REPO = 'https://github.com/arturborycki/swarm-app';
@@ -10,8 +10,8 @@ export const DMG = `https://swarm-term.com/download/Swarm-${VERSION}.dmg`;
 /** Linux builds of swarmd, swarm-shim and swarmctl, for installing on a server by hand (scripts/make-linux-tarballs.sh). */
 export const linuxTarball = (arch: 'x86_64' | 'aarch64') =>
   `https://swarm-term.com/download/swarmd-${VERSION}-linux-${arch}.tar.gz`;
-export const LINUX_SHA256_X86_64 = 'ef9512413d9abe207b9357d8b491bc139c7205e87a0d85a588f0d7ea0c7041ec';
-export const LINUX_SHA256_AARCH64 = '6c9fce55e6f74cff192c1818885f54b835c99f24c148da606bef0749cf1f02c6';
+export const LINUX_SHA256_X86_64 = '91410bfb45d02b66f81b5d8359c1519446b617ee607e1af41e701992491e7579';
+export const LINUX_SHA256_AARCH64 = '56fcf2c56ff990686b68d452074963c26008dcb1ab2f5b20410106d0c529a6cb';
 /** The DMG's SHA-256 and the Ed25519 signature the app checks before installing it (scripts/sign-update.sh). */
-export const DMG_SHA256 = '98b8c2f0ca470fa4e93b3c5561708931261069276416322488816e3e3865b9bd';
-export const DMG_SIGNATURE = 'FLZaoQ5j5Vkr+MyeiB78wDYI4+EJkIL93URpiob9cS0kcWPQukpgJjzpzgg2Yz0AhdYiAJn1HHT0YXOlum3GAg==';
+export const DMG_SHA256 = 'cb38b8f5cba4cd22c96499cba4f3f92bbc41a1957402aa5c2e43645a5d1cbb0b';
+export const DMG_SIGNATURE = 'SDlo+OybGOKheQ67jgQLT++nNaxlTsyIF2rfd5y/GByQfpwV54LTtbUW6b/IuRH4ye+8OWAGK4E6eDj8NmF7BA==';
