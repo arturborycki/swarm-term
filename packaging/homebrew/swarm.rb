@@ -2,8 +2,8 @@
 # repository meets Homebrew's notability rules. scripts/update-homebrew.sh sets
 # `version` and `sha256` after each release.
 cask "swarm" do
-  version "0.1.3"
-  sha256 "e2274bd9a6420d4fc29151c80de3b2b92d26ea55724c1aa9aa03f1c2a3067cd3"
+  version "0.1.4"
+  sha256 "98b8c2f0ca470fa4e93b3c5561708931261069276416322488816e3e3865b9bd"
 
   url "https://github.com/arturborycki/swarm-term/releases/download/v#{version}/Swarm-#{version}.dmg",
       verified: "github.com/arturborycki/swarm-term/"
