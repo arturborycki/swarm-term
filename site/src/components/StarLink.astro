@@ -12,11 +12,11 @@ const { class: className, short = false } = Astro.props;
 ---
 
 {REPO_PUBLIC && (
-  <a href={REPO} class:list={['star', className]} data-star>
+  <a href={REPO} class:list={['star', className]} aria-label={short ? 'Star Swarm on GitHub' : undefined}>
     <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
       <path fill="currentColor" d="M12 2.5l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17.3l-5.9 3.3 1.3-6.6-4.9-4.6 6.6-.8z" />
     </svg>
-    {short ? 'star' : 'Star on GitHub'}
+    <span class="star-text">{short ? 'star' : 'Star on GitHub'}</span>
   </a>
 )}
 
@@ -28,7 +28,21 @@ const { class: className, short = false } = Astro.props;
   }
 
   .star svg {
-    color: #e3b341;
+    /* Dark enough to read on the light background, bright on the dark one. */
+    color: #a77708;
     flex: none;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .star svg {
+      color: #e3b341;
+    }
+  }
+
+  /* Narrow phones: the header's star keeps only its icon. */
+  @media (max-width: 400px) {
+    .star[aria-label] .star-text {
+      display: none;
+    }
   }
 </style>

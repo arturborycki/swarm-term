@@ -253,8 +253,11 @@ const nav = [
     }
   }
 
-  .cols a,
-  .cols :global(.repo-soon) {
+  /* The link columns. :global(a): links drawn by components (RepoLink,
+     StarLink) carry their own scope, so a scoped `.cols a` would miss them;
+     the brand column (with the news form's inline links) is left alone. */
+  .cols > div:not(.brandcol) > :global(a),
+  .cols > div:not(.brandcol) > :global(.repo-soon) {
     display: block;
     color: var(--ink-2);
     text-decoration: none;
@@ -262,7 +265,11 @@ const nav = [
     overflow-wrap: anywhere;
   }
 
-  .cols a:hover {
+  .cols > div:not(.brandcol) > :global(a.star) {
+    display: flex;
+  }
+
+  .cols > div:not(.brandcol) > :global(a:hover) {
     color: var(--ink);
   }
 
