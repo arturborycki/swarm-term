@@ -111,6 +111,17 @@ pub fn close_inherited_fds_except(keep: &[i32]) {
     }
 }
 
+/// Like `ensure_private_dir`, but only if `dir`'s parent exists: used to put
+/// a removed runtime folder back without creating folders above it (on Linux
+/// `/run/user/<uid>` is gone, and can't be made by the user, until they log
+/// in again). Fails with `NotFound` while the parent is missing.
+pub fn ensure_private_dir_in_place(dir: &Path) -> io::Result<()> {
+    if !dir.parent().is_some_and(Path::is_dir) {
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} has no parent folder", dir.display())));
+    }
+    ensure_private_dir(dir)
+}
+
 /// Creates `dir` (and parents) and makes sure it is a `0700` directory owned
 /// by the current user.
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {

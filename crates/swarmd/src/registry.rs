@@ -19,8 +19,9 @@ use tokio::sync::broadcast;
 
 /// How long a shim may take to answer a request.
 const SHIM_TIMEOUT: Duration = Duration::from_secs(5);
-/// For requests that wait for the session's process (`Remove`).
-const SHIM_SLOW_TIMEOUT: Duration = Duration::from_secs(10);
+/// For requests that wait for the session's process (`Remove`) or start a
+/// program (`Upgrade`).
+const SHIM_SLOW_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long to wait for a known session's socket to come back.
 const SOCKET_RETURN_WAIT: Duration = Duration::from_millis(3500);
 /// How often the shims folder is checked for sockets the daemon doesn't know.
@@ -107,6 +108,15 @@ impl Registry {
             });
         }
         while tasks.join_next().await.is_some() {}
+    }
+
+    /// Session ids with a socket in the shims folder, adopted or not.
+    pub fn socket_ids(&self) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(paths::shims_dir(&self.runtime)) else { return Vec::new() };
+        entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.strip_suffix(".sock").map(str::to_string))
+            .collect()
     }
 
     /// Looks for new shim sockets every few seconds.
@@ -399,8 +409,10 @@ impl Registry {
     }
 
     async fn simple(&self, id: &str, req: ShimRequest) -> Result<()> {
-        // `Remove` waits up to 5 s for the process to end before answering.
-        let limit = if matches!(req, ShimRequest::Remove) { SHIM_SLOW_TIMEOUT } else { SHIM_TIMEOUT };
+        // `Remove` waits up to 5 s for the process to end before answering;
+        // `Upgrade` first runs the new program, whose first start can be slow
+        // (macOS checks a newly installed binary).
+        let limit = if matches!(req, ShimRequest::Remove | ShimRequest::Upgrade { .. }) { SHIM_SLOW_TIMEOUT } else { SHIM_TIMEOUT };
         timed(limit, async {
             let mut stream = self.connect(id).await?;
             write_frame(&mut stream, &req).await?;

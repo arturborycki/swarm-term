@@ -93,6 +93,9 @@ impl Drop for Env {
         })
         .join()
         .unwrap();
+        // Any shim left (its socket missing at this moment, e.g. after a test
+        // removed the runtime folder) would otherwise outlive the test.
+        let _ = Command::new("pkill").args(["-f", &format!("--runtime-dir {}", self.runtime().display())]).status();
     }
 }
 
@@ -1179,4 +1182,49 @@ async fn input_for_a_program_that_does_not_read_is_capped() {
     let rss_kb: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
     assert!(rss_kb < 48 * 1024, "the shim holds {} MiB after 64 MiB of unread input", rss_kb / 1024);
     assert!(c.list().await.unwrap().iter().any(|s| s.id == info.id && s.is_running()));
+}
+
+/// After a logout without lingering, the runtime folder is gone and can't be
+/// made again until the next login (here: its parent can't be written). The
+/// old daemon waits; at the next login a client starts a new daemon before
+/// the shims have put their sockets back. With restore-after-reboot and
+/// spill-to-disk on, nothing may be restored twice and no spilled output of
+/// a running session may be deleted.
+#[tokio::test]
+async fn a_logout_without_lingering_neither_duplicates_nor_loses_sessions() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = Env::new().await;
+    swarmd_cli(&env, &["restore", "on"]);
+    swarmd_cli(&env, &["spill", "on"]);
+    let info = env.client().await.create(sh_opts("kept")).await.unwrap();
+    let spill = env.dir.path().join("state/spill").join(&info.id);
+    assert!(spill.is_dir(), "spill dir missing at start");
+    // Let the snapshot record the session.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Logged out: the folder goes, and can't be made again.
+    let mut old = env.daemon.take().unwrap();
+    std::fs::remove_dir_all(env.runtime()).unwrap();
+    std::fs::set_permissions(env.dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(old.try_wait().unwrap().is_none(), "the daemon must wait, not exit, while logged out");
+
+    // Logged in again; a client starts a daemon at once.
+    std::fs::set_permissions(env.dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir(env.runtime()).unwrap();
+    env.start_daemon().await;
+    let c = wait_listed(&env, &info.id, 15).await;
+
+    // Past the new daemon's start-up grace, when it cleans up.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let listed = c.list().await.unwrap();
+    assert_eq!(listed.len(), 1, "sessions were duplicated: {:?}", listed.iter().map(|s| (&s.id, &s.ui)).collect::<Vec<_>>());
+    assert_eq!(listed[0].id, info.id);
+    assert!(spill.is_dir(), "the running session's spilled output was deleted");
+
+    let old_alive = old.try_wait().unwrap().is_none();
+    let new_alive = env.daemon.as_mut().unwrap().try_wait().unwrap().is_none();
+    let _ = old.kill();
+    let _ = old.wait();
+    assert!(old_alive != new_alive, "exactly one daemon must be left (old {old_alive}, new {new_alive})");
 }

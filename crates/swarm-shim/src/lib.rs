@@ -121,28 +121,55 @@ const SOCKET_CHECK_EVERY: Duration = Duration::from_secs(3);
 
 /// Puts the shim's socket back if it disappears: on Linux without lingering,
 /// systemd deletes `/run/user/<uid>` when the user's last login ends, while
-/// the session keeps running. `swarmd` finds the socket again by looking at
+/// the session keeps running. The folder is only recreated once its parent
+/// exists again (at the next login); `swarmd` finds the socket by looking at
 /// the shims folder every few seconds.
-async fn keep_socket(session: Arc<Session>, shutdown: Arc<Notify>, handoff: Arc<handoff::HandoffCtx>) {
+async fn keep_socket(
+    session: Arc<Session>,
+    shutdown: Arc<Notify>,
+    handoff: Arc<handoff::HandoffCtx>,
+    mut serving: tokio::task::JoinHandle<()>,
+) {
     let sock = paths::shim_socket(&handoff.runtime_dir, &handoff.id);
+    // Set while the socket is missing and couldn't be put back yet: say so once.
+    let mut reported = false;
     loop {
         tokio::time::sleep(SOCKET_CHECK_EVERY).await;
+        if handoff.closing.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
         if std::fs::symlink_metadata(&sock).is_ok() {
+            reported = false;
             continue;
         }
-        tracing::warn!(id = %handoff.id, "{} was removed; putting it back", sock.display());
-        let bound = paths::ensure_private_dir(&handoff.runtime_dir)
+        // A handoff in progress has the lock: try again next time.
+        let _guard = match handoff.rebind.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => continue,
+        };
+        if handoff.closing.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let bound = paths::ensure_private_dir_in_place(&handoff.runtime_dir)
             .and_then(|_| paths::ensure_private_dir(&paths::shims_dir(&handoff.runtime_dir)))
             .and_then(|_| UnixListener::bind(&sock))
             .and_then(|l| std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).map(|_| l));
         match bound {
             Ok(listener) => {
-                // The old listener's file is gone; an in-place update hands
-                // over this one.
+                // An in-place update hands over this listener; the old one,
+                // whose file is gone, is closed.
                 handoff.listen_fd.store(listener.as_raw_fd(), std::sync::atomic::Ordering::Release);
-                tokio::spawn(server::serve(session.clone(), listener, shutdown.clone(), handoff.clone()));
+                serving.abort();
+                serving = tokio::spawn(server::serve(session.clone(), listener, shutdown.clone(), handoff.clone()));
+                tracing::info!(id = %handoff.id, "put the socket back at {}", sock.display());
+                reported = false;
             }
-            Err(e) => tracing::warn!(id = %handoff.id, "couldn't put the socket back, will try again: {e}"),
+            Err(e) if !reported => {
+                tracing::warn!(id = %handoff.id, "{} is gone; the session keeps running and the socket comes back when the folder can be made again ({e})", sock.display());
+                reported = true;
+            }
+            Err(_) => {}
         }
     }
 }
@@ -192,11 +219,13 @@ async fn async_run(cfg: ShimConfig) -> Result<()> {
         scrollback: cfg.scrollback,
         exit_retention: cfg.exit_retention,
         listen_fd: std::sync::atomic::AtomicI32::new(listener.as_raw_fd()),
+        rebind: std::sync::Mutex::new(()),
+        closing: std::sync::atomic::AtomicBool::new(false),
     });
 
     let shutdown = Arc::new(Notify::new());
-    tokio::spawn(server::serve(session.clone(), listener, shutdown.clone(), handoff.clone()));
-    let keeper = tokio::spawn(keep_socket(session.clone(), shutdown.clone(), handoff));
+    let serving = tokio::spawn(server::serve(session.clone(), listener, shutdown.clone(), handoff.clone()));
+    let keeper = tokio::spawn(keep_socket(session.clone(), shutdown.clone(), handoff.clone(), serving));
 
     let fg = session.clone();
     tokio::spawn(async move {
@@ -217,6 +246,7 @@ async fn async_run(cfg: ShimConfig) -> Result<()> {
         _ = shutdown.notified() => tracing::info!(id = %cfg.id, "session removed"),
         _ = exited => tracing::info!(id = %cfg.id, "exit retention passed"),
     }
+    handoff.closing.store(true, std::sync::atomic::Ordering::Release);
     keeper.abort();
     let _ = std::fs::remove_file(&sock);
     // The session is gone: so is what it spilled.

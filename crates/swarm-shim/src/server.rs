@@ -105,6 +105,10 @@ async fn handle(
         }
         ShimRequest::Remove => {
             remove(&session).await;
+            // The socket goes before the answer, so `swarmd` never finds it
+            // again and adopts a session it was just told is removed.
+            handoff.closing.store(true, std::sync::atomic::Ordering::Release);
+            let _ = std::fs::remove_file(swarm_proto::paths::shim_socket(&handoff.runtime_dir, &handoff.id));
             write_frame(&mut wr, &ShimMsg::Ok).await?;
             shutdown.notify_one();
             Ok(())

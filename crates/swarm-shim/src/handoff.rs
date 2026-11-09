@@ -84,6 +84,11 @@ pub struct HandoffCtx {
     /// The listening socket the next program keeps serving (replaced if the
     /// shim had to bind its socket again).
     pub listen_fd: std::sync::atomic::AtomicI32,
+    /// Held while the socket is bound again and through a handoff, so the
+    /// next program never gets a listener that was just replaced.
+    pub rebind: std::sync::Mutex<()>,
+    /// Set once the session is being removed: its socket stays gone.
+    pub closing: std::sync::atomic::AtomicBool,
 }
 
 /// Descriptors and facts the new program is started with.
@@ -119,6 +124,7 @@ pub async fn check_exe(exe: &Path) -> Result<()> {
 pub fn hand_off(session: &Arc<Session>, ctx: &HandoffCtx, exe: &Path) -> anyhow::Error {
     // Stop reading output between reads: unread output stays in the PTY for
     // the next program, and nothing read is lost.
+    let _no_rebind = ctx.rebind.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if !session.reader_ctl.pause(Duration::from_secs(2)) {
         session.reader_ctl.resume();
         return anyhow!("the session's output reader didn't stop");

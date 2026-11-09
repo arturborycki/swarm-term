@@ -23,6 +23,59 @@ fn snapshot_path() -> PathBuf {
     paths::state_dir().join("sessions.snapshot")
 }
 
+/// The boot the snapshot was written in: process ids only mean anything
+/// within one boot.
+fn boot_path() -> PathBuf {
+    paths::state_dir().join("sessions.boot")
+}
+
+/// An id for the current boot of this machine.
+pub fn boot_id() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok().map(|s| s.trim().to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut tv: libc::timeval = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::timeval>();
+        let rc = unsafe {
+            libc::sysctlbyname(
+                c"kern.boottime".as_ptr(),
+                &mut tv as *mut libc::timeval as *mut libc::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (rc == 0).then(|| format!("{}.{}", tv.tv_sec, tv.tv_usec))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Whether process `pid` exists.
+fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Ids of snapshot sessions that are still running somewhere: their shell
+/// lives on in this boot, though their shim may not be reachable yet (its
+/// socket comes back a few seconds after a logout without lingering).
+pub fn still_running() -> Vec<String> {
+    let same_boot = boot_id().is_some() && std::fs::read_to_string(boot_path()).ok() == boot_id();
+    if !same_boot {
+        return Vec::new();
+    }
+    load().into_iter().filter(|s| process_alive(s.pid)).map(|s| s.id).collect()
+}
+
 fn marker_path() -> PathBuf {
     paths::state_dir().join("restore-after-reboot")
 }
@@ -52,6 +105,9 @@ fn save(sessions: &[SessionInfo]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, &path)?;
+    if let Some(boot) = boot_id() {
+        std::fs::write(boot_path(), boot)?;
+    }
     Ok(())
 }
 
@@ -62,9 +118,10 @@ fn load() -> Vec<SessionInfo> {
         .unwrap_or_default()
 }
 
-/// Snapshot sessions with no live session of the same id.
-pub fn lost(snapshot: Vec<SessionInfo>, live: &[SessionInfo]) -> Vec<SessionInfo> {
-    snapshot.into_iter().filter(|s| !live.iter().any(|l| l.id == s.id)).collect()
+/// Snapshot sessions with no live session of the same id, leaving out those
+/// still running elsewhere (`running`: see `still_running`).
+pub fn lost(snapshot: Vec<SessionInfo>, live: &[SessionInfo], running: &[String]) -> Vec<SessionInfo> {
+    snapshot.into_iter().filter(|s| !live.iter().any(|l| l.id == s.id) && !running.contains(&s.id)).collect()
 }
 
 /// How to recreate `s`: its shell (or the login shell), folder, name and
@@ -88,9 +145,10 @@ pub fn recreate_opts(s: &SessionInfo) -> CreateOpts {
 }
 
 /// Recreates lost sessions (when enabled), then keeps the snapshot current.
-pub async fn start(registry: &Arc<Registry>) {
+/// `running`: sessions still running though not adopted yet; they are not lost.
+pub async fn start(registry: &Arc<Registry>, running: &[String]) {
     if is_enabled() {
-        for s in lost(load(), &registry.list()) {
+        for s in lost(load(), &registry.list(), running) {
             match registry.create(recreate_opts(&s)).await {
                 Ok(new) => tracing::info!(old = %s.id, new = %new.id, "restored session after restart"),
                 Err(e) => tracing::warn!(old = %s.id, "couldn't restore session: {e:#}"),
@@ -165,7 +223,19 @@ mod tests {
 
     #[test]
     fn only_sessions_without_a_shim_are_lost() {
-        let lost = lost(vec![session("A", &["zsh"]), session("B", &["zsh"])], &[session("A", &["zsh"])]);
+        let lost = lost(vec![session("A", &["zsh"]), session("B", &["zsh"])], &[session("A", &["zsh"])], &[]);
         assert_eq!(lost.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["B"]);
+    }
+
+    #[test]
+    fn sessions_still_running_elsewhere_are_not_lost() {
+        let snapshot = vec![session("A", &["zsh"]), session("B", &["zsh"])];
+        assert!(lost(snapshot, &[], &["A".into(), "B".into()]).is_empty());
+    }
+
+    #[test]
+    fn this_process_is_alive_and_a_boot_id_exists() {
+        assert!(process_alive(std::process::id()));
+        assert!(boot_id().is_some());
     }
 }

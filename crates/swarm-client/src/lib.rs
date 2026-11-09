@@ -397,10 +397,15 @@ pub fn resolve<'a>(sessions: &'a [SessionInfo], query: &str) -> Result<&'a Sessi
 }
 
 /// Refuses a host that ssh would read as something else: one starting with
-/// `-` is an option (`-oProxyCommand=…` runs a local command), and control
-/// characters or whitespace have no place in a host name.
+/// `-` is an option (`-oProxyCommand=…` runs a local command), one with `/`
+/// is a local path to scp, and control characters or whitespace have no
+/// place in a host name.
 pub fn check_ssh_host(host: &str) -> Result<()> {
-    if host.is_empty() || host.starts_with('-') || host.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    if host.is_empty()
+        || host.starts_with('-')
+        || host.contains('/')
+        || host.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
         bail!("{host:?} is not a host name");
     }
     Ok(())
@@ -623,7 +628,7 @@ mod host_tests {
         for ok in ["devbox", "me@devbox", "me@10.0.0.2", "host.example.com", "[::1]"] {
             assert!(check_ssh_host(ok).is_ok(), "{ok}");
         }
-        for bad in ["", "-oProxyCommand=touch /tmp/x", "-p22", "a b", "host\nx", "a\tb"] {
+        for bad in ["", "-oProxyCommand=touch /tmp/x", "-p22", "a b", "host\nx", "a\tb", "./dir", "a/b"] {
             assert!(check_ssh_host(bad).is_err(), "{bad:?}");
         }
     }

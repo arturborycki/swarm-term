@@ -189,17 +189,30 @@ fn run(if_not_running: bool) -> Result<()> {
         let registry = registry::Registry::new(runtime.clone(), shim);
         registry.adopt_existing().await?;
         tokio::spawn(registry.clone().watch_shims_dir());
-        // Sessions started by an older build move to this build's shim,
-        // one at a time, without restarting.
+        // Adoption may not have found every session yet: a shim that was slow
+        // to answer, or one whose socket is still on its way back after a
+        // logout. Those are running, so they are neither restored nor have
+        // their spilled output removed.
+        let mut running = restore::still_running();
+        running.extend(registry.socket_ids());
+        restore::start(&registry, &running).await;
         let upgrading = registry.clone();
         tokio::spawn(async move {
+            // Sessions started by an older build move to this build's shim,
+            // one at a time, without restarting.
             upgrading.upgrade_shims(false).await;
             // The spill setting may have changed while the daemon was down.
             upgrading.apply_spill().await;
-            let live: Vec<String> = upgrading.list().into_iter().map(|s| s.id).collect();
-            spill::remove_orphans(&live);
+            // Give late shims time to come back, then do the same for them.
+            tokio::time::sleep(STARTUP_GRACE).await;
+            upgrading.adopt_new().await;
+            upgrading.upgrade_shims(false).await;
+            upgrading.apply_spill().await;
+            let mut keep: Vec<String> = upgrading.list().into_iter().map(|s| s.id).collect();
+            keep.extend(upgrading.socket_ids());
+            keep.extend(running);
+            spill::remove_orphans(&keep);
         });
-        restore::start(&registry).await;
         tokio::spawn(memory::run(registry.clone()));
         let shutdown = Arc::new(Notify::new());
         let server = Arc::new(server::Server { registry, shutdown: shutdown.clone() });
@@ -225,6 +238,10 @@ fn run(if_not_running: bool) -> Result<()> {
         Ok(())
     })
 }
+
+/// How long after starting the daemon waits for shims it couldn't adopt
+/// right away before it cleans up after sessions that are gone.
+const STARTUP_GRACE: Duration = Duration::from_secs(10);
 
 /// How often the daemon checks that its socket is still there.
 const SOCKET_CHECK_EVERY: Duration = Duration::from_secs(3);
@@ -253,29 +270,41 @@ static BOUND_INODE: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
 /// Puts the daemon's socket back if it disappears. On Linux without
 /// lingering, systemd deletes `/run/user/<uid>` (socket and lock included)
 /// when the user's last login ends, while the daemon and sessions keep
-/// running. Without this, the next connection would start a second daemon
-/// that can't see them. If another daemon got there first (the path is
-/// taken, or its lock is held), this one exits, and the newer daemon adopts
-/// the sessions once their shims have put their own sockets back.
+/// running. The folder can only be made again once the user logs back in, so
+/// until then the daemon waits. Then it takes the lock again and binds the
+/// socket; if another daemon got there first (a client started one), this one
+/// exits, and that daemon adopts the sessions once their shims have put their
+/// own sockets back.
 ///
 /// Returns `true` when this daemon should exit because it was replaced.
 async fn keep_socket(server: Arc<server::Server>, runtime: PathBuf, mut bound: Option<u64>) -> bool {
     let sock = paths::daemon_socket(&runtime);
-    // Lock files taken again after the old ones were deleted.
-    let mut locks = Vec::new();
+    // The lock taken again after the old file was deleted, and the listener
+    // serving the socket bound again (the first one is served by `run`).
+    let mut relock: Option<std::fs::File> = None;
+    let mut serving: Option<tokio::task::JoinHandle<()>> = None;
+    let mut reported = false;
     loop {
         tokio::time::sleep(SOCKET_CHECK_EVERY).await;
         match inode(&sock) {
-            now if now == bound => continue,
+            now if now == bound => {
+                reported = false;
+                continue;
+            }
             Some(_) => {
                 tracing::warn!("{} now belongs to another swarmd; leaving the sessions to it", sock.display());
                 return true;
             }
             None => {}
         }
-        tracing::warn!("{} was removed (logged out without lingering?); putting it back", sock.display());
-        let relisten = async {
-            paths::ensure_private_dir(&runtime)?;
+        if let Err(e) = paths::ensure_private_dir_in_place(&runtime) {
+            if !reported {
+                tracing::warn!("{} is gone; waiting for the folder to come back ({e})", sock.display());
+                reported = true;
+            }
+            continue;
+        }
+        let relisten = (|| {
             paths::ensure_private_dir(&paths::shims_dir(&runtime))?;
             let lock_file = lock(&paths::daemon_lock(&runtime))?;
             if inode(&sock).is_some() {
@@ -283,17 +312,21 @@ async fn keep_socket(server: Arc<server::Server>, runtime: PathBuf, mut bound: O
             }
             let listener = bind(&sock)?;
             Ok::<_, anyhow::Error>((lock_file, listener))
-        };
-        match relisten.await {
+        })();
+        match relisten {
             Ok((lock_file, listener)) => {
-                locks.push(lock_file);
+                relock = Some(lock_file);
                 bound = inode(&sock);
                 *BOUND_INODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = bound;
-                tokio::spawn(server.clone().serve(listener));
+                if let Some(old) = serving.replace(tokio::spawn(server.clone().serve(listener))) {
+                    old.abort();
+                }
                 tracing::info!(socket = %sock.display(), "listening again");
+                reported = false;
             }
             Err(e) => {
                 tracing::warn!("couldn't put the socket back ({e:#}); leaving the sessions to the other swarmd");
+                drop(relock);
                 return true;
             }
         }
