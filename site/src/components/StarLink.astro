@@ -1,0 +1,34 @@
+---
+// "Star on GitHub": stars help people find Swarm, and Homebrew looks at them
+// before it lists an app. No live count: the page makes no request to GitHub.
+import { REPO, REPO_PUBLIC } from '../site';
+
+interface Props {
+  class?: string;
+  /** Shorter label, for the header. */
+  short?: boolean;
+}
+const { class: className, short = false } = Astro.props;
+---
+
+{REPO_PUBLIC && (
+  <a href={REPO} class:list={['star', className]} data-star>
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="currentColor" d="M12 2.5l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17.3l-5.9 3.3 1.3-6.6-4.9-4.6 6.6-.8z" />
+    </svg>
+    {short ? 'star' : 'Star on GitHub'}
+  </a>
+)}
+
+<style>
+  .star {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .star svg {
+    color: #e3b341;
+    flex: none;
+  }
+</style>
