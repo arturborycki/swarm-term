@@ -2,7 +2,8 @@
 import { Image } from 'astro:assets';
 import Base from '../layouts/Base.astro';
 import hero from '../assets/hero.png';
-import { APP_REPO, DMG, REPO, VERSION, linuxTarball } from '../site';
+import StarLink from '../components/StarLink.astro';
+import { APP_REPO, DMG, REPO, REPO_PUBLIC, VERSION, linuxTarball } from '../site';
 
 const features = [
   {
@@ -108,6 +109,7 @@ const faqPage = {
         Download for macOS
       </a>
       <a class="btn" href="/docs/">Read the docs</a>
+      <StarLink class="btn" />
     </div>
     <div class="cmd" aria-label="Command line client">
       <span class="prompt">$</span>
@@ -243,6 +245,14 @@ const faqPage = {
           <a class="more" href="/docs/#server-install">Install instructions and checksums →</a>
         </article>
       </div>
+      {REPO_PUBLIC && <aside class="support">
+        <p>
+          <strong>Like Swarm?</strong> Star it on GitHub. It's free and takes a second, it helps other people find
+          Swarm, and stars are what Homebrew looks at before it lists an app, so they
+          bring{' '}<code>brew install</code>{' '}closer.
+        </p>
+        <StarLink class="btn" />
+      </aside>}
     </div>
   </section>
 </Base>
@@ -550,6 +560,34 @@ const faqPage = {
   @media (max-width: 899px) {
     .split {
       grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  .support {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 20px 28px;
+    border: 1px dashed var(--line-strong);
+    min-width: 0;
+  }
+
+  .support p {
+    margin: 0;
+    color: var(--ink-2);
+    max-width: 62ch;
+  }
+
+  .support strong {
+    color: var(--ink);
+  }
+
+  @media (max-width: 699px) {
+    .support {
+      flex-direction: column;
+      align-items: flex-start;
+      padding: 20px 16px;
     }
   }
 

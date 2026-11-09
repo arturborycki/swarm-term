@@ -8,6 +8,7 @@ import Hive from '../components/Hive.astro';
 import NewsSignup from '../components/NewsSignup.astro';
 import RepoLink from '../components/RepoLink.astro';
 import { APP_REPO, DMG, REPO_PUBLIC, VERSION } from '../site';
+import StarLink from '../components/StarLink.astro';
 
 interface Props {
   title: string;
@@ -75,6 +76,7 @@ const nav = [
             <a href={item.href} class:list={['navlink', { here: path.startsWith(item.href) }]}>{item.label}</a>
           ))}
           <RepoLink class="navlink">github</RepoLink>
+          <StarLink class="navlink" short />
           <a class="btn primary small" href={DMG}>Download</a>
         </nav>
       </div>
@@ -102,6 +104,7 @@ const nav = [
         <div>
           <p class="head">project</p>
           <RepoLink>github</RepoLink>
+          <StarLink />
           {REPO_PUBLIC && <a href={APP_REPO}>app source</a>}
           <RepoLink path="/blob/main/docs/DESIGN.md">design</RepoLink>
           <RepoLink path="/blob/main/SECURITY.md">security</RepoLink>
@@ -250,8 +253,11 @@ const nav = [
     }
   }
 
-  .cols a,
-  .cols :global(.repo-soon) {
+  /* The link columns. :global(a): links drawn by components (RepoLink,
+     StarLink) carry their own scope, so a scoped `.cols a` would miss them;
+     the brand column (with the news form's inline links) is left alone. */
+  .cols > div:not(.brandcol) > :global(a),
+  .cols > div:not(.brandcol) > :global(.repo-soon) {
     display: block;
     color: var(--ink-2);
     text-decoration: none;
@@ -259,7 +265,11 @@ const nav = [
     overflow-wrap: anywhere;
   }
 
-  .cols a:hover {
+  .cols > div:not(.brandcol) > :global(a.star) {
+    display: flex;
+  }
+
+  .cols > div:not(.brandcol) > :global(a:hover) {
     color: var(--ink);
   }
 
