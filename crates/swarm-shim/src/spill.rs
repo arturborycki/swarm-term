@@ -84,7 +84,7 @@ impl Spill {
     }
 
     pub fn export(&self) -> SpillHandoff {
-        let st = self.state.lock().unwrap();
+        let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         SpillHandoff {
             dir: self.dir.clone(),
             key: self.key,
@@ -117,7 +117,7 @@ impl Spill {
 
     /// Keeps `bytes`, which start at absolute offset `start`.
     pub fn append(&self, start: u64, bytes: &[u8]) {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if st.closed || bytes.is_empty() {
             return;
         }
@@ -143,7 +143,7 @@ impl Spill {
 
     /// The pieces of output before offset `until`, oldest first.
     pub fn pieces(&self, until: u64) -> Vec<Piece> {
-        let st = self.state.lock().unwrap();
+        let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut out: Vec<Piece> = st.written.iter().map(|&(start, len)| Piece::File { start, len }).collect();
         out.extend(st.queued.iter().map(|(start, bytes)| Piece::Memory { start: *start, bytes: bytes.clone() }));
         if !st.open.is_empty() {
@@ -174,7 +174,7 @@ impl Spill {
 
     /// Stops spilling and deletes everything spilled.
     pub fn destroy(&self) {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         st.closed = true;
         st.written.clear();
         st.queued.clear();
@@ -225,9 +225,9 @@ fn start_writer(spill: &Arc<Spill>) -> Result<()> {
     let s = spill.clone();
     std::thread::Builder::new().name("spill-writer".into()).spawn(move || loop {
         let (start, bytes) = {
-            let mut st = s.state.lock().unwrap();
+            let mut st = s.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             while st.queued.is_empty() && !st.closed {
-                st = s.cv.wait(st).unwrap();
+                st = s.cv.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
             }
             if st.closed {
                 return;
@@ -235,7 +235,7 @@ fn start_writer(spill: &Arc<Spill>) -> Result<()> {
             st.queued.front().cloned().unwrap()
         };
         let written = s.write_chunk(start, &bytes);
-        let mut st = s.state.lock().unwrap();
+        let mut st = s.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if st.closed {
             return;
         }
@@ -298,7 +298,7 @@ mod tests {
 
     fn wait_written(spill: &Spill, n: usize) {
         for _ in 0..500 {
-            if spill.state.lock().unwrap().written.len() >= n {
+            if spill.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).written.len() >= n {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -333,7 +333,7 @@ mod tests {
         let data = vec![7u8; CHUNK * 4];
         spill.append(0, &data);
         for _ in 0..1000 {
-            if spill.state.lock().unwrap().queued.is_empty() {
+            if spill.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).queued.is_empty() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -351,7 +351,7 @@ mod tests {
         spill.append(0, &data[..CHUNK + 5]);
         let handed = postcard::to_stdvec(&spill.export()).unwrap();
         // The old program is gone (its writer thread with it).
-        spill.state.lock().unwrap().closed = true;
+        spill.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).closed = true;
         spill.cv.notify_all();
         let next = Spill::import(postcard::from_bytes(&handed).unwrap()).unwrap();
         next.append(CHUNK as u64 + 5, &data[CHUNK + 5..]);

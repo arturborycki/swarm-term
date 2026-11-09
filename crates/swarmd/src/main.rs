@@ -183,11 +183,12 @@ fn run(if_not_running: bool) -> Result<()> {
     rt.block_on(async move {
         let sock = paths::daemon_socket(&runtime);
         let _ = std::fs::remove_file(&sock);
-        let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
-        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+        let listener = bind(&sock)?;
+        let bound = inode(&sock);
 
         let registry = registry::Registry::new(runtime.clone(), shim);
         registry.adopt_existing().await?;
+        tokio::spawn(registry.clone().watch_shims_dir());
         // Sessions started by an older build move to this build's shim,
         // one at a time, without restarting.
         let upgrading = registry.clone();
@@ -203,17 +204,100 @@ fn run(if_not_running: bool) -> Result<()> {
         let shutdown = Arc::new(Notify::new());
         let server = Arc::new(server::Server { registry, shutdown: shutdown.clone() });
         tracing::info!(socket = %sock.display(), "swarmd {} listening", swarm_proto::VERSION);
+        let keeper = tokio::spawn(keep_socket(server.clone(), runtime.clone(), bound));
 
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            _ = server.serve(listener) => {}
-            _ = shutdown.notified() => tracing::info!("shutdown requested"),
-            _ = term.recv() => tracing::info!("SIGTERM"),
-            _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT"),
+        let replaced = tokio::select! {
+            _ = server.clone().serve(listener) => false,
+            _ = shutdown.notified() => { tracing::info!("shutdown requested"); false }
+            _ = term.recv() => { tracing::info!("SIGTERM"); false }
+            _ = tokio::signal::ctrl_c() => { tracing::info!("SIGINT"); false }
+            r = keeper => r.unwrap_or(false),
+        };
+        // Only remove the socket if it is still ours: after systemd removed
+        // the runtime folder, the path may belong to a newer daemon.
+        if !replaced {
+            let current = inode(&sock);
+            if current.is_some() && current == our_inode(bound) {
+                let _ = std::fs::remove_file(&sock);
+            }
         }
-        let _ = std::fs::remove_file(&sock);
         Ok(())
     })
+}
+
+/// How often the daemon checks that its socket is still there.
+const SOCKET_CHECK_EVERY: Duration = Duration::from_secs(3);
+
+fn bind(sock: &Path) -> Result<UnixListener> {
+    let listener = UnixListener::bind(sock).with_context(|| format!("bind {}", sock.display()))?;
+    std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+/// The inode at `path`, if something is there.
+fn inode(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).ok().map(|m| m.ino())
+}
+
+/// The inode of the socket this daemon bound last: `first`, unless the
+/// keeper has bound it again since.
+fn our_inode(first: Option<u64>) -> Option<u64> {
+    BOUND_INODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).or(first)
+}
+
+/// Set by `keep_socket` when it binds the socket again.
+static BOUND_INODE: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+/// Puts the daemon's socket back if it disappears. On Linux without
+/// lingering, systemd deletes `/run/user/<uid>` (socket and lock included)
+/// when the user's last login ends, while the daemon and sessions keep
+/// running. Without this, the next connection would start a second daemon
+/// that can't see them. If another daemon got there first (the path is
+/// taken, or its lock is held), this one exits, and the newer daemon adopts
+/// the sessions once their shims have put their own sockets back.
+///
+/// Returns `true` when this daemon should exit because it was replaced.
+async fn keep_socket(server: Arc<server::Server>, runtime: PathBuf, mut bound: Option<u64>) -> bool {
+    let sock = paths::daemon_socket(&runtime);
+    // Lock files taken again after the old ones were deleted.
+    let mut locks = Vec::new();
+    loop {
+        tokio::time::sleep(SOCKET_CHECK_EVERY).await;
+        match inode(&sock) {
+            now if now == bound => continue,
+            Some(_) => {
+                tracing::warn!("{} now belongs to another swarmd; leaving the sessions to it", sock.display());
+                return true;
+            }
+            None => {}
+        }
+        tracing::warn!("{} was removed (logged out without lingering?); putting it back", sock.display());
+        let relisten = async {
+            paths::ensure_private_dir(&runtime)?;
+            paths::ensure_private_dir(&paths::shims_dir(&runtime))?;
+            let lock_file = lock(&paths::daemon_lock(&runtime))?;
+            if inode(&sock).is_some() {
+                bail!("another swarmd took its place");
+            }
+            let listener = bind(&sock)?;
+            Ok::<_, anyhow::Error>((lock_file, listener))
+        };
+        match relisten.await {
+            Ok((lock_file, listener)) => {
+                locks.push(lock_file);
+                bound = inode(&sock);
+                *BOUND_INODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = bound;
+                tokio::spawn(server.clone().serve(listener));
+                tracing::info!(socket = %sock.display(), "listening again");
+            }
+            Err(e) => {
+                tracing::warn!("couldn't put the socket back ({e:#}); leaving the sessions to the other swarmd");
+                return true;
+            }
+        }
+    }
 }
 
 /// Holds an exclusive `flock` for the life of the process.

@@ -77,6 +77,7 @@ impl Client {
     /// Connects to `host`'s daemon through `ssh host swarmd bridge`. Uses the
     /// system ssh, so keys, agent and `~/.ssh/config` apply.
     pub async fn connect_ssh(host: &str, client_name: &str) -> Result<Client> {
+        check_ssh_host(host)?;
         let remote = remote_swarmd_command("bridge");
         let mut child = tokio::process::Command::new("ssh")
             .args([
@@ -87,6 +88,7 @@ impl Client {
                 "ServerAliveInterval=10",
                 "-o",
                 "ServerAliveCountMax=3",
+                "--",
                 host,
                 &remote,
             ])
@@ -176,11 +178,11 @@ impl Client {
                 };
                 match msg {
                     ServerMsg::Response { id, result } => {
-                        let Some((reply, stream_tx)) = s.pending.lock().unwrap().remove(&id) else { continue };
+                        let Some((reply, stream_tx)) = s.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id) else { continue };
                         // Register the stream before anyone can see the response,
                         // so no output for it is ever dropped.
                         if let (Ok(Response::Attached { stream, .. }), Some(tx)) = (&result, stream_tx) {
-                            s.streams.lock().unwrap().insert(*stream, tx);
+                            s.streams.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(*stream, tx);
                         }
                         let _ = reply.send(result);
                     }
@@ -203,8 +205,8 @@ impl Client {
                 }
             }
             // Connection lost: fail everything still waiting.
-            s.pending.lock().unwrap().clear();
-            for (_, tx) in s.streams.lock().unwrap().drain() {
+            s.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+            for (_, tx) in s.streams.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drain() {
                 let _ = tx.send(StreamEvent::Closed { reason: "connection to daemon lost".into() });
             }
         });
@@ -236,7 +238,7 @@ impl Client {
     ) -> Result<Response> {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.shared.pending.lock().unwrap().insert(id, (tx, stream_tx));
+        self.shared.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id, (tx, stream_tx));
         self.shared.out.send(ClientMsg::Request { id, req }).await.map_err(|_| anyhow!("connection closed"))?;
         match rx.await {
             Ok(Ok(r)) => Ok(r),
@@ -323,7 +325,7 @@ impl Client {
 
 impl Shared {
     fn send_stream(&self, stream: StreamId, ev: StreamEvent, last: bool) {
-        let mut streams = self.streams.lock().unwrap();
+        let mut streams = self.streams.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(tx) = streams.get(&stream) {
             let _ = tx.send(ev);
         }
@@ -358,7 +360,7 @@ impl Attachment {
 
     pub async fn detach(mut self) -> Result<()> {
         self.detached = true;
-        self.client.shared.streams.lock().unwrap().remove(&self.stream);
+        self.client.shared.streams.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.stream);
         self.send(ClientMsg::Detach { stream: self.stream }).await
     }
 
@@ -370,7 +372,7 @@ impl Attachment {
 impl Drop for Attachment {
     fn drop(&mut self) {
         if !self.detached {
-            self.client.shared.streams.lock().unwrap().remove(&self.stream);
+            self.client.shared.streams.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.stream);
             let _ = self.client.shared.out.try_send(ClientMsg::Detach { stream: self.stream });
         }
     }
@@ -392,6 +394,16 @@ pub fn resolve<'a>(sessions: &'a [SessionInfo], query: &str) -> Result<&'a Sessi
         (0, 0) => bail!("no session matches {query:?}"),
         _ => bail!("{query:?} matches more than one session"),
     }
+}
+
+/// Refuses a host that ssh would read as something else: one starting with
+/// `-` is an option (`-oProxyCommand=…` runs a local command), and control
+/// characters or whitespace have no place in a host name.
+pub fn check_ssh_host(host: &str) -> Result<()> {
+    if host.is_empty() || host.starts_with('-') || host.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        bail!("{host:?} is not a host name");
+    }
+    Ok(())
 }
 
 /// A remote shell command running `swarmd <args>` from the per-user install
@@ -600,6 +612,21 @@ fn scan_eol_mark(s: &[u8]) -> Scan {
         return if tail.starts_with(rest) { Scan::Partial } else { Scan::No };
     }
     if spaces >= EOL_MARK_MIN_SPACES && rest.starts_with(tail) { Scan::Full(j + tail.len()) } else { Scan::No }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::check_ssh_host;
+
+    #[test]
+    fn options_and_odd_characters_are_not_hosts() {
+        for ok in ["devbox", "me@devbox", "me@10.0.0.2", "host.example.com", "[::1]"] {
+            assert!(check_ssh_host(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "-oProxyCommand=touch /tmp/x", "-p22", "a b", "host\nx", "a\tb"] {
+            assert!(check_ssh_host(bad).is_err(), "{bad:?}");
+        }
+    }
 }
 
 #[cfg(test)]

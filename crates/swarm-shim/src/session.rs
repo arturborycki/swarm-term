@@ -24,6 +24,8 @@ const CLIENT_QUEUE: usize = 1024;
 /// Activity-only info changes are published at most this often.
 pub const ACTIVITY_NOTIFY_INTERVAL: Duration = Duration::from_secs(1);
 const NO_LAG: u64 = u64::MAX;
+/// Most input held for a program that isn't reading it.
+pub(crate) const MAX_PENDING_INPUT: usize = 16 * 1024 * 1024;
 
 pub struct Session {
     pub(crate) inner: Mutex<Inner>,
@@ -31,7 +33,7 @@ pub struct Session {
     /// update can hand it to the next shim program.
     pub(crate) master: OwnedFd,
     input_tx: std::sync::mpsc::Sender<Vec<u8>>,
-    /// Input chunks queued for the writer thread and not yet written.
+    /// Bytes of input queued for the writer thread and not yet written.
     pub(crate) pending_input: Arc<AtomicUsize>,
     info_tx: watch::Sender<SessionInfo>,
     pid: u32,
@@ -59,34 +61,34 @@ struct ReaderState {
 impl ReaderCtl {
     /// Called by the reader between reads; waits while paused.
     fn park_if_paused(&self) {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !st.paused {
             return;
         }
         st.parked = true;
         self.cv.notify_all();
         while st.paused {
-            st = self.cv.wait(st).unwrap();
+            st = self.cv.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         st.parked = false;
     }
 
     fn finish(&self) {
-        self.state.lock().unwrap().finished = true;
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).finished = true;
         self.cv.notify_all();
     }
 
     /// Asks the reader to stop and waits until it has. False if it didn't
     /// within `timeout` or has already finished (the PTY closed).
     pub(crate) fn pause(&self, timeout: Duration) -> bool {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         st.paused = true;
-        let (st, _) = self.cv.wait_timeout_while(st, timeout, |st| !st.parked && !st.finished).unwrap();
+        let (st, _) = self.cv.wait_timeout_while(st, timeout, |st| !st.parked && !st.finished).unwrap_or_else(std::sync::PoisonError::into_inner);
         st.parked && !st.finished
     }
 
     pub(crate) fn resume(&self) {
-        self.state.lock().unwrap().paused = false;
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).paused = false;
         self.cv.notify_all();
     }
 }
@@ -141,7 +143,7 @@ pub(crate) struct Inner {
     /// Recent commands' block headers, oldest first.
     pub(crate) headers: std::collections::VecDeque<BlockHeader>,
     /// The terminal screen as the output left it, for full-screen apps.
-    pub(crate) screen: vt100::Parser,
+    pub(crate) screen: crate::screen::Screen,
     pub(crate) scanner: Scanner,
     pub(crate) info: SessionInfo,
     clients: HashMap<u64, Slot>,
@@ -155,7 +157,7 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
-    pub(crate) fn new(ring: Ring, screen: vt100::Parser, info: SessionInfo) -> Inner {
+    pub(crate) fn new(ring: Ring, screen: crate::screen::Screen, info: SessionInfo) -> Inner {
         Inner {
             ring,
             sticky: Vec::new(),
@@ -268,7 +270,7 @@ impl Session {
             buffer_end: 0,
             alt_screen: false,
         };
-        let mut inner = Inner::new(Ring::new(scrollback), vt100::Parser::new(info.size.rows, info.size.cols, 0), info);
+        let mut inner = Inner::new(Ring::new(scrollback), crate::screen::Screen::new(info.size.rows, info.size.cols), info);
         if let Some(cfg) = spill {
             match Spill::create(cfg, id) {
                 Ok(s) => inner.spill = Some(s),
@@ -307,7 +309,7 @@ impl Session {
         std::thread::Builder::new().name("pty-writer".into()).spawn(move || {
             for data in input_rx {
                 let ok = writer.write_all(&data).and_then(|_| writer.flush()).is_ok();
-                pending_input.fetch_sub(1, Ordering::AcqRel);
+                pending_input.fetch_sub(data.len(), Ordering::AcqRel);
                 if !ok {
                     break;
                 }
@@ -328,7 +330,14 @@ impl Session {
                 }
                 match reader.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => s.on_output(&buf[..n]),
+                    Ok(n) => {
+                        // A bug in handling output must not stop the session's
+                        // output: the shell would block once the PTY filled.
+                        let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.on_output(&buf[..n])));
+                        if handled.is_err() {
+                            tracing::error!("handling output failed; carrying on");
+                        }
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                     Err(_) => break,
@@ -336,7 +345,7 @@ impl Session {
             }
             s.reader_ctl.finish();
             let (lock, cv) = &s.reader_done;
-            *lock.lock().unwrap() = true;
+            *lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
             cv.notify_all();
         })?;
 
@@ -354,7 +363,7 @@ impl Session {
     }
 
     fn on_output(&self, data: &[u8]) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let offset = inner.ring.end();
         match inner.spill.clone() {
             Some(spill) => {
@@ -444,10 +453,10 @@ impl Session {
         // Let the reader drain what the child wrote last, so `Exited` follows
         // the final output.
         let (lock, cv) = &self.reader_done;
-        let done = lock.lock().unwrap();
+        let done = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = cv.wait_timeout_while(done, Duration::from_millis(500), |d| !*d);
 
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.info.state = SessionState::Exited { code, signal, at_ms: now_ms() };
         for slot in inner.clients.values() {
             let _ = slot.tx.try_send(ShimMsg::Exited { code, signal });
@@ -456,7 +465,7 @@ impl Session {
     }
 
     pub fn attach(&self, desc: ClientDesc, mode: AttachMode, size: Option<Size>) -> Attachment {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let history = mode == AttachMode::History;
         let replay_from = match mode {
             AttachMode::Full => inner.ring.replay_start(),
@@ -523,9 +532,9 @@ impl Session {
             SessionState::Running => None,
         };
         let wants_repaint = inner.info.alt_screen && exited.is_none() && !readonly && mode == AttachMode::Full;
-        let screen = (full && exited.is_none() && inner.info.alt_screen && inner.screen.screen().alternate_screen()).then(|| {
+        let screen = (full && exited.is_none() && inner.info.alt_screen && inner.screen.alternate()).then(|| {
             let mut bytes = b"\x1b[?1049h".to_vec();
-            bytes.extend(inner.screen.screen().state_formatted());
+            bytes.extend(inner.screen.formatted());
             bytes
         });
         self.notify(&mut inner, true);
@@ -534,7 +543,7 @@ impl Session {
     }
 
     pub fn detach(&self, client_id: u64) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if inner.clients.remove(&client_id).is_some() {
             if smallest_policy(&inner) {
                 self.apply_smallest(&mut inner);
@@ -544,7 +553,7 @@ impl Session {
     }
 
     pub fn input(&self, client_id: u64, data: Vec<u8>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(slot) = inner.clients.get(&client_id) else { return };
         if slot.desc.readonly || !inner.info.is_running() {
             return;
@@ -557,14 +566,21 @@ impl Session {
         }
         inner.info.last_input_ms = now_ms();
         drop(inner);
-        self.pending_input.fetch_add(1, Ordering::AcqRel);
+        // A program that doesn't read its input (stopped, or busy) leaves it
+        // queued here; past the cap, more is dropped rather than held.
+        let len = data.len();
+        if self.pending_input.fetch_add(len, Ordering::AcqRel) + len > MAX_PENDING_INPUT {
+            self.pending_input.fetch_sub(len, Ordering::AcqRel);
+            tracing::warn!("dropped {len} bytes of input: the program hasn't read the last {} MiB", MAX_PENDING_INPUT >> 20);
+            return;
+        }
         if self.input_tx.send(data).is_err() {
-            self.pending_input.fetch_sub(1, Ordering::AcqRel);
+            self.pending_input.fetch_sub(len, Ordering::AcqRel);
         }
     }
 
     pub fn client_resize(&self, client_id: u64, size: Size) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(slot) = inner.clients.get_mut(&client_id) else { return };
         slot.size = Some(size);
         let readonly = slot.desc.readonly;
@@ -580,7 +596,7 @@ impl Session {
 
     /// Makes a full-screen app repaint by briefly changing the size.
     pub async fn nudge_repaint(&self) {
-        let size = self.inner.lock().unwrap().info.size;
+        let size = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).info.size;
         if size.rows < 2 {
             return;
         }
@@ -630,11 +646,11 @@ impl Session {
     }
 
     pub fn is_running(&self) -> bool {
-        self.inner.lock().unwrap().info.is_running()
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).info.is_running()
     }
 
     pub fn set_meta(&self, update: MetaUpdate) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(name) = update.name {
             inner.info.name = name.filter(|n| !n.is_empty());
         }
@@ -653,7 +669,7 @@ impl Session {
 
     /// Drops all but the last `keep` bytes of scrollback and frees the memory.
     pub fn trim(&self, keep: usize) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let trimmed = match inner.spill.clone() {
             Some(spill) => inner.ring.trim_taking(keep).map(|(at, dropped)| spill.append(at, &dropped)).is_some(),
             None => inner.ring.trim(keep),
@@ -665,7 +681,7 @@ impl Session {
 
     /// Starts (`Some`) or stops spilling to disk; stopping deletes the spill.
     pub fn set_spill(&self, cfg: Option<SpillConfig>) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match cfg {
             None => {
                 if let Some(spill) = inner.spill.take() {
@@ -682,7 +698,7 @@ impl Session {
     }
 
     pub fn info(&self) -> SessionInfo {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.snapshot(&inner)
     }
 
@@ -693,7 +709,7 @@ impl Session {
     /// Republishes info if the foreground process changed (it produces no
     /// output event) or an activity change is still unpublished.
     pub fn refresh(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let fg = self.foreground();
         if fg != inner.info.foreground || inner.unpublished {
             inner.info.foreground = fg;

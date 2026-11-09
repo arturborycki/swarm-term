@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use swarm_proto::{
-    read_frame, write_frame, ClientDesc, ClientMsg, Request, Response, ServerMsg, ShimInput, ShimMsg, StreamId,
+    read_frame, write_frame, ClientDesc, ClientMsg, Request, Response, ServerMsg, SessionEvent, ShimInput, ShimMsg, StreamId,
     PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -51,7 +51,9 @@ impl Server {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let (client_id, client_name) = match read_frame::<_, ClientMsg>(&mut rd).await {
+        // A connection that never says hello mustn't hold a task forever.
+        let hello = tokio::time::timeout(std::time::Duration::from_secs(30), read_frame::<_, ClientMsg>(&mut rd)).await;
+        let (client_id, client_name) = match hello.unwrap_or(Ok(None)) {
             Ok(Some(ClientMsg::Hello { proto, client_name, client_id })) => {
                 let welcome = ServerMsg::Welcome {
                     proto: PROTOCOL_VERSION,
@@ -82,6 +84,9 @@ impl Server {
         let mut tasks = Vec::new();
 
         while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+            // A connection can live for weeks (the app lists sessions every
+            // few seconds): drop handles of tasks that are done.
+            tasks.retain(|t: &tokio::task::JoinHandle<()>| !t.is_finished());
             match msg {
                 ClientMsg::Hello { .. } => {}
                 ClientMsg::Input { stream, data } => {
@@ -113,6 +118,7 @@ impl Server {
                 }
                 ClientMsg::Request { id, req: Request::Subscribe } => {
                     let mut events = self.registry.subscribe();
+                    let registry = self.registry.clone();
                     let out = out_tx.clone();
                     let _ = out.send(ServerMsg::Response { id, result: Ok(Response::Ok) }).await;
                     tasks.push(tokio::spawn(async move {
@@ -124,7 +130,15 @@ impl Server {
                                     }
                                 }
                                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                                    tracing::warn!("event subscriber lagged by {n}");
+                                    // Events were missed: send every session's
+                                    // current state, so the client catches up
+                                    // (and re-lists, which also covers removals).
+                                    tracing::warn!("event subscriber lagged by {n}; resending session states");
+                                    for info in registry.list() {
+                                        if out.send(ServerMsg::Event(SessionEvent::Updated(info))).await.is_err() {
+                                            return;
+                                        }
+                                    }
                                 }
                                 Err(broadcast::error::RecvError::Closed) => break,
                             }

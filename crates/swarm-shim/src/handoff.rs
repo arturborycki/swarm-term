@@ -81,8 +81,9 @@ pub struct HandoffCtx {
     pub runtime_dir: PathBuf,
     pub scrollback: usize,
     pub exit_retention: Duration,
-    /// The listening socket the next program keeps serving.
-    pub listen_fd: RawFd,
+    /// The listening socket the next program keeps serving (replaced if the
+    /// shim had to bind its socket again).
+    pub listen_fd: std::sync::atomic::AtomicI32,
 }
 
 /// Descriptors and facts the new program is started with.
@@ -122,7 +123,7 @@ pub fn hand_off(session: &Arc<Session>, ctx: &HandoffCtx, exe: &Path) -> anyhow:
         session.reader_ctl.resume();
         return anyhow!("the session's output reader didn't stop");
     }
-    let inner = session.inner.lock().unwrap();
+    let mut inner = session.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Input that's been accepted must reach the PTY first.
     let deadline = Instant::now() + Duration::from_secs(2);
     while session.pending_input.load(Ordering::Acquire) > 0 {
@@ -133,7 +134,7 @@ pub fn hand_off(session: &Arc<Session>, ctx: &HandoffCtx, exe: &Path) -> anyhow:
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    let err = match write_state(ctx, &export(&inner)) {
+    let err = match write_state(ctx, &export(&mut inner)) {
         Ok(state) => exec(session, ctx, exe, &state),
         Err(e) => e,
     };
@@ -142,9 +143,10 @@ pub fn hand_off(session: &Arc<Session>, ctx: &HandoffCtx, exe: &Path) -> anyhow:
     err
 }
 
-fn export(inner: &Inner) -> HandoffState {
-    let screen = inner.screen.screen();
-    let (rows, cols) = screen.size();
+fn export(inner: &mut Inner) -> HandoffState {
+    let (rows, cols) = inner.screen.size();
+    let alternate = inner.screen.alternate();
+    let contents = inner.screen.formatted();
     HandoffState {
         version: HANDOFF_VERSION,
         info: inner.info.clone(),
@@ -152,7 +154,7 @@ fn export(inner: &Inner) -> HandoffState {
         sticky: inner.sticky.iter().map(|(n, o, b)| (n.to_string(), *o, b.clone())).collect(),
         pending_precmd: inner.pending_precmd.clone(),
         headers: inner.headers.iter().cloned().collect(),
-        screen: ScreenState { rows, cols, alternate: screen.alternate_screen(), contents: screen.state_formatted() },
+        screen: ScreenState { rows, cols, alternate, contents },
         next_client: inner.next_client,
         spill: inner.spill.as_ref().map(|s| s.export()),
     }
@@ -177,7 +179,7 @@ fn write_state(ctx: &HandoffCtx, state: &HandoffState) -> Result<OwnedFd> {
 }
 
 fn exec(session: &Session, ctx: &HandoffCtx, exe: &Path, state: &OwnedFd) -> anyhow::Error {
-    let fds = [session.master.as_raw_fd(), ctx.listen_fd, state.as_raw_fd()];
+    let fds = [session.master.as_raw_fd(), ctx.listen_fd.load(Ordering::Acquire), state.as_raw_fd()];
     for fd in fds {
         set_cloexec(fd, false);
     }
@@ -266,7 +268,7 @@ fn read_state(fd: RawFd) -> Result<HandoffState> {
 
 fn import(state: HandoffState, scrollback: usize) -> Inner {
     let ring = Ring::import(state.ring, scrollback);
-    let mut screen = vt100::Parser::new(state.screen.rows, state.screen.cols, 0);
+    let mut screen = crate::screen::Screen::new(state.screen.rows, state.screen.cols);
     if state.screen.alternate {
         screen.process(b"\x1b[?1049h");
     }
@@ -319,7 +321,7 @@ fn fresh_inner(id: &str, pid: u32, scrollback: usize, size: Size) -> Inner {
         buffer_end: 0,
         alt_screen: false,
     };
-    Inner::new(Ring::new(scrollback), vt100::Parser::new(size.rows, size.cols, 0), info)
+    Inner::new(Ring::new(scrollback), crate::screen::Screen::new(size.rows, size.cols), info)
 }
 
 fn pty_size(fd: RawFd) -> Size {

@@ -4,6 +4,7 @@
 mod buffer;
 pub mod handoff;
 mod scan;
+mod screen;
 mod server;
 mod session;
 pub mod spill;
@@ -48,7 +49,7 @@ pub fn handed_over_fds(args: &[String]) -> Vec<i32> {
 }
 
 impl ShimConfig {
-    /// Parses `--id ID --runtime-dir DIR --opts HEX [--scrollback BYTES] [--retention-secs N]`.
+    /// Parses `--id ID --runtime-dir DIR (--opts-stdin | --opts HEX) [--scrollback BYTES] [--retention-secs N]`.
     pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Self> {
         let mut id = None;
         let mut runtime_dir = None;
@@ -63,6 +64,12 @@ impl ShimConfig {
             match flag.as_str() {
                 "--id" => id = Some(value()?),
                 "--runtime-dir" => runtime_dir = Some(PathBuf::from(value()?)),
+                // From `swarmd`: the options come on stdin, out of sight of `ps`.
+                "--opts-stdin" => {
+                    let mut bytes = Vec::new();
+                    std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes).context("read the options")?;
+                    opts = Some(postcard::from_bytes::<CreateOpts>(&bytes).context("the options are not CreateOpts")?);
+                }
                 "--opts" => {
                     let bytes = swarm_proto::hex::decode(&value()?).context("--opts is not hex")?;
                     opts = Some(postcard::from_bytes::<CreateOpts>(&bytes).context("--opts is not CreateOpts")?);
@@ -106,6 +113,37 @@ impl ShimConfig {
             scrollback: scrollback.max(64 * 1024),
             exit_retention,
         })
+    }
+}
+
+/// How often the shim checks that its socket is still there.
+const SOCKET_CHECK_EVERY: Duration = Duration::from_secs(3);
+
+/// Puts the shim's socket back if it disappears: on Linux without lingering,
+/// systemd deletes `/run/user/<uid>` when the user's last login ends, while
+/// the session keeps running. `swarmd` finds the socket again by looking at
+/// the shims folder every few seconds.
+async fn keep_socket(session: Arc<Session>, shutdown: Arc<Notify>, handoff: Arc<handoff::HandoffCtx>) {
+    let sock = paths::shim_socket(&handoff.runtime_dir, &handoff.id);
+    loop {
+        tokio::time::sleep(SOCKET_CHECK_EVERY).await;
+        if std::fs::symlink_metadata(&sock).is_ok() {
+            continue;
+        }
+        tracing::warn!(id = %handoff.id, "{} was removed; putting it back", sock.display());
+        let bound = paths::ensure_private_dir(&handoff.runtime_dir)
+            .and_then(|_| paths::ensure_private_dir(&paths::shims_dir(&handoff.runtime_dir)))
+            .and_then(|_| UnixListener::bind(&sock))
+            .and_then(|l| std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).map(|_| l));
+        match bound {
+            Ok(listener) => {
+                // The old listener's file is gone; an in-place update hands
+                // over this one.
+                handoff.listen_fd.store(listener.as_raw_fd(), std::sync::atomic::Ordering::Release);
+                tokio::spawn(server::serve(session.clone(), listener, shutdown.clone(), handoff.clone()));
+            }
+            Err(e) => tracing::warn!(id = %handoff.id, "couldn't put the socket back, will try again: {e}"),
+        }
     }
 }
 
@@ -153,11 +191,12 @@ async fn async_run(cfg: ShimConfig) -> Result<()> {
         runtime_dir: cfg.runtime_dir.clone(),
         scrollback: cfg.scrollback,
         exit_retention: cfg.exit_retention,
-        listen_fd: listener.as_raw_fd(),
+        listen_fd: std::sync::atomic::AtomicI32::new(listener.as_raw_fd()),
     });
 
     let shutdown = Arc::new(Notify::new());
-    tokio::spawn(server::serve(session.clone(), listener, shutdown.clone(), handoff));
+    tokio::spawn(server::serve(session.clone(), listener, shutdown.clone(), handoff.clone()));
+    let keeper = tokio::spawn(keep_socket(session.clone(), shutdown.clone(), handoff));
 
     let fg = session.clone();
     tokio::spawn(async move {
@@ -178,6 +217,7 @@ async fn async_run(cfg: ShimConfig) -> Result<()> {
         _ = shutdown.notified() => tracing::info!(id = %cfg.id, "session removed"),
         _ = exited => tracing::info!(id = %cfg.id, "exit retention passed"),
     }
+    keeper.abort();
     let _ = std::fs::remove_file(&sock);
     // The session is gone: so is what it spilled.
     let _ = session.set_spill(None);

@@ -73,7 +73,8 @@ const toc = [
         move to the new version without restarting.
       </p>
       <p>
-        On a Linux host, sessions end when you log out of it unless lingering is on. To keep them running, run
+        On a Linux host, systemd may end your sessions when your last login there ends (for example when your Mac
+        sleeps), unless lingering is on. Turn it on for the host in Settings → Hosts, or run
         <code>loginctl enable-linger</code> on the host once.
       </p>
 

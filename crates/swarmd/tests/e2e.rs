@@ -998,3 +998,185 @@ async fn scrollback_over_the_total_cap_is_trimmed_from_idle_sessions() {
     let (out, replayed) = read_until(&mut a, "done-2").await;
     assert!(replayed && out.len() <= 1 << 20, "replay of {} bytes", out.len());
 }
+
+// ---------------------------------------------------------------------------
+// Resilience
+
+/// The shim process running session `info` (the shell's parent).
+fn shim_pid(shell_pid: u32) -> u32 {
+    let out = Command::new("ps").args(["-o", "ppid=", "-p", &shell_pid.to_string()]).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+}
+
+/// Waits up to `secs` for a fresh connection whose `list` has session `id`.
+async fn wait_listed(env: &Env, id: &str, secs: u64) -> Client {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Ok(s) = UnixStream::connect(paths::daemon_socket(&env.runtime())).await {
+            let (rd, wr) = s.into_split();
+            if let Ok(c) = Client::handshake(rd, wr, "e2e").await {
+                if let Ok(Ok(listed)) = timeout(Duration::from_secs(2), c.list()).await {
+                    if listed.iter().any(|s| s.id == id && s.is_running()) {
+                        return c;
+                    }
+                }
+            }
+        }
+        assert!(tokio::time::Instant::now() < deadline, "session {id} not reachable within {secs} s");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// systemd deletes `/run/user/<uid>` at the last logout when lingering is
+/// off, taking every socket with it while the processes keep running.
+#[tokio::test]
+async fn sessions_stay_reachable_after_the_runtime_dir_is_removed() {
+    let mut env = Env::new().await;
+    let c = env.client().await;
+    let info = c.create(sh_opts("logout")).await.unwrap();
+    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    a.input(b"echo before-logout\n".to_vec()).await.unwrap();
+    read_until(&mut a, "before-logout\r\n").await;
+    drop(a);
+    c.close();
+
+    std::fs::remove_dir_all(env.runtime()).unwrap();
+
+    let c = wait_listed(&env, &info.id, 15).await;
+    assert!(env.daemon.as_mut().unwrap().try_wait().unwrap().is_none(), "the same daemon keeps running");
+    let mut a = c.attach(&info.id, AttachMode::Full, None, false).await.unwrap();
+    read_until(&mut a, "before-logout").await;
+    a.input(b"echo after-login\n".to_vec()).await.unwrap();
+    read_until(&mut a, "after-login\r\n").await;
+}
+
+/// A client may start a new daemon before the old one notices its socket is
+/// gone. One daemon must be left, with the session.
+#[tokio::test]
+async fn a_new_daemon_takes_over_after_the_runtime_dir_is_removed() {
+    let mut env = Env::new().await;
+    let info = env.client().await.create(sh_opts("handover")).await.unwrap();
+    let mut old = env.daemon.take().unwrap();
+
+    std::fs::remove_dir_all(env.runtime()).unwrap();
+    env.start_daemon().await;
+
+    let c = wait_listed(&env, &info.id, 15).await;
+    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    a.input(b"echo still-here\n".to_vec()).await.unwrap();
+    read_until(&mut a, "still-here\r\n").await;
+
+    // Within a few checks, only one of the two daemons is left.
+    let mut alive = 2;
+    for _ in 0..100 {
+        alive = [old.try_wait().unwrap().is_none(), env.daemon.as_mut().unwrap().try_wait().unwrap().is_none()]
+            .iter()
+            .filter(|a| **a)
+            .count();
+        if alive == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = old.kill();
+    let _ = old.wait();
+    assert_eq!(alive, 1, "both daemons are still running");
+}
+
+/// A shim that accepts connections but never answers must not hold up the
+/// daemon's start or other sessions.
+#[tokio::test]
+async fn a_stopped_shim_does_not_hold_up_the_daemon() {
+    let mut env = Env::new().await;
+    let c = env.client().await;
+    let stuck = c.create(sh_opts("stuck")).await.unwrap();
+    let fine = c.create(sh_opts("fine")).await.unwrap();
+    c.close();
+    let stuck_shim = shim_pid(stuck.pid);
+    unsafe { libc::kill(stuck_shim as i32, libc::SIGSTOP) };
+
+    env.kill_daemon();
+    env.start_daemon().await;
+    let result = timeout(Duration::from_secs(20), async {
+        let c = wait_listed(&env, &fine.id, 15).await;
+        let mut a = c.attach(&fine.id, AttachMode::Live, None, false).await.unwrap();
+        a.input(b"echo fine-here\n".to_vec()).await.unwrap();
+        read_until(&mut a, "fine-here\r\n").await;
+        // The stopped one fails in bounded time instead of hanging.
+        let started = std::time::Instant::now();
+        let r = c.attach(&stuck.id, AttachMode::Live, None, false).await;
+        (r.is_err(), started.elapsed())
+    })
+    .await;
+    unsafe { libc::kill(stuck_shim as i32, libc::SIGCONT) };
+    let (failed, took) = result.expect("the daemon hung on a stopped shim");
+    assert!(failed, "attaching to a stopped shim can't succeed");
+    assert!(took < Duration::from_secs(8), "took {took:?}");
+    // Once it runs again, the daemon picks it up.
+    wait_listed(&env, &stuck.id, 15).await;
+}
+
+/// Output that crashes the screen model (`vt100`) must not take the session
+/// with it: here a wide character in a one-column terminal.
+#[tokio::test]
+async fn output_that_crashes_the_screen_model_leaves_the_session_working() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let mut opts = sh_opts("narrow");
+    opts.size = Size { cols: 1, rows: 24 };
+    let info = c.create(opts).await.unwrap();
+    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    a.input(b"printf '\\346\\274\\242\\n'; echo after-$((6*7))\n".to_vec()).await.unwrap();
+    read_until(&mut a, "after-42").await;
+    a.resize(Size { cols: 80, rows: 24 }).await.unwrap();
+    a.input(b"echo still-$((2+3))\n".to_vec()).await.unwrap();
+    read_until(&mut a, "still-5").await;
+    // Info and a new full attach still work.
+    let c2 = env.client().await;
+    assert!(c2.list().await.unwrap().iter().any(|s| s.id == info.id && s.is_running()));
+    let mut b = c2.attach(&info.id, AttachMode::Full, None, false).await.unwrap();
+    read_until(&mut b, "still-5").await;
+}
+
+/// What a session is created with (command, folder, environment) must not
+/// show in the shim's command line, which other users can read with `ps`.
+#[tokio::test]
+async fn create_options_stay_off_the_command_line() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let mut opts = sh_opts("private");
+    opts.env.push(("SWARM_E2E_SECRET".into(), "s3cr3t-value".into()));
+    let info = c.create(opts).await.unwrap();
+    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    a.input(b"echo got-$SWARM_E2E_SECRET\n".to_vec()).await.unwrap();
+    read_until(&mut a, "got-s3cr3t-value").await;
+
+    let out = Command::new("ps").args(["-ww", "-o", "args=", "-p", &shim_pid(info.pid).to_string()]).output().unwrap();
+    let args = String::from_utf8_lossy(&out.stdout);
+    assert!(args.contains("swarm-shim"), "{args}");
+    assert!(!args.contains("s3cr3t") && !args.contains("--opts "), "options visible to ps: {args}");
+}
+
+/// Input for a program that doesn't read it is capped, not held without limit.
+#[tokio::test]
+async fn input_for_a_program_that_does_not_read_is_capped() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let mut opts = sh_opts("not-reading");
+    // Raw mode, like a busy full-screen app: the terminal stops taking input
+    // once its buffer is full, instead of discarding it.
+    opts.command = vec!["/bin/sh".into(), "-c".into(), "stty raw -echo; sleep 600".into()];
+    let info = c.create(opts).await.unwrap();
+    let a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    let chunk = vec![b'x'; 64 * 1024];
+    for _ in 0..(64 * 16) {
+        a.input(chunk.clone()).await.unwrap();
+    }
+    // Let the relay deliver what it accepted.
+    c.ping().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let out = Command::new("ps").args(["-o", "rss=", "-p", &shim_pid(info.pid).to_string()]).output().unwrap();
+    let rss_kb: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+    assert!(rss_kb < 48 * 1024, "the shim holds {} MiB after 64 MiB of unread input", rss_kb / 1024);
+    assert!(c.list().await.unwrap().iter().any(|s| s.id == info.id && s.is_running()));
+}
