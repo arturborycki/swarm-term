@@ -169,6 +169,9 @@ fn run(if_not_running: bool) -> Result<()> {
     init_logging();
     let runtime = paths::runtime_dir();
     paths::ensure_private_dir(&runtime)?;
+    // Session names, folders, commands and logs: for this user only.
+    paths::ensure_private_dir(&paths::state_dir())?;
+    paths::ensure_private_dir(&paths::log_dir())?;
     let _lock = match lock(&paths::daemon_lock(&runtime)) {
         Ok(l) => l,
         Err(_) if if_not_running => {
@@ -183,37 +186,179 @@ fn run(if_not_running: bool) -> Result<()> {
     rt.block_on(async move {
         let sock = paths::daemon_socket(&runtime);
         let _ = std::fs::remove_file(&sock);
-        let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
-        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+        let listener = bind(&sock)?;
+        let bound = inode(&sock);
+        let lock_ino = inode(&paths::daemon_lock(&runtime));
 
         let registry = registry::Registry::new(runtime.clone(), shim);
-        registry.adopt_existing().await?;
-        // Sessions started by an older build move to this build's shim,
-        // one at a time, without restarting.
+        // Sessions whose shell still runs in this boot: their shim may be
+        // stopped or slow, or its socket still on its way back after a
+        // logout. They are neither restored, nor is their socket or spilled
+        // output removed.
+        let mut running = restore::still_running();
+        registry.adopt_existing(&running).await?;
+        tokio::spawn(registry.clone().watch_shims_dir());
+        running.extend(registry.socket_ids());
+        restore::start(&registry, &running).await;
         let upgrading = registry.clone();
         tokio::spawn(async move {
+            // Sessions started by an older build move to this build's shim,
+            // one at a time, without restarting.
             upgrading.upgrade_shims(false).await;
             // The spill setting may have changed while the daemon was down.
             upgrading.apply_spill().await;
-            let live: Vec<String> = upgrading.list().into_iter().map(|s| s.id).collect();
-            spill::remove_orphans(&live);
+            // Give late shims time to come back, then do the same for them.
+            tokio::time::sleep(STARTUP_GRACE).await;
+            upgrading.adopt_new().await;
+            upgrading.upgrade_shims(false).await;
+            upgrading.apply_spill().await;
+            // From here on, the rescan updates shims it adopts late itself.
+            upgrading.startup_done();
+            spill::remove_orphans(|id| {
+                running.iter().any(|r| r == id)
+                    || upgrading.socket_ids().iter().any(|s| s == id)
+                    || upgrading.list().iter().any(|s| s.id == id)
+            });
         });
-        restore::start(&registry).await;
         tokio::spawn(memory::run(registry.clone()));
         let shutdown = Arc::new(Notify::new());
         let server = Arc::new(server::Server { registry, shutdown: shutdown.clone() });
         tracing::info!(socket = %sock.display(), "swarmd {} listening", swarm_proto::VERSION);
+        let keeper = tokio::spawn(keep_socket(server.clone(), runtime.clone(), bound, lock_ino));
 
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            _ = server.serve(listener) => {}
-            _ = shutdown.notified() => tracing::info!("shutdown requested"),
-            _ = term.recv() => tracing::info!("SIGTERM"),
-            _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT"),
+        let replaced = tokio::select! {
+            _ = server.clone().serve(listener) => false,
+            _ = shutdown.notified() => { tracing::info!("shutdown requested"); false }
+            _ = term.recv() => { tracing::info!("SIGTERM"); false }
+            _ = tokio::signal::ctrl_c() => { tracing::info!("SIGINT"); false }
+            r = keeper => r.unwrap_or(false),
+        };
+        // Only remove the socket if it is still ours: after systemd removed
+        // the runtime folder, the path may belong to a newer daemon.
+        if !replaced {
+            let current = inode(&sock);
+            if current.is_some() && current == our_inode(bound) {
+                let _ = std::fs::remove_file(&sock);
+            }
         }
-        let _ = std::fs::remove_file(&sock);
         Ok(())
     })
+}
+
+/// How long after starting the daemon waits for shims it couldn't adopt
+/// right away before it cleans up after sessions that are gone.
+const STARTUP_GRACE: Duration = Duration::from_secs(10);
+
+/// How often the daemon checks that its socket is still there.
+const SOCKET_CHECK_EVERY: Duration = Duration::from_secs(3);
+
+fn bind(sock: &Path) -> Result<UnixListener> {
+    let listener = UnixListener::bind(sock).with_context(|| format!("bind {}", sock.display()))?;
+    std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+/// The inode at `path`, if something is there.
+fn inode(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).ok().map(|m| m.ino())
+}
+
+/// The inode of the socket this daemon bound last: `first`, unless the
+/// keeper has bound it again since.
+fn our_inode(first: Option<u64>) -> Option<u64> {
+    BOUND_INODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).or(first)
+}
+
+/// Set by `keep_socket` when it binds the socket again.
+static BOUND_INODE: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+/// Puts the daemon's socket back if it disappears. On Linux without
+/// lingering, systemd deletes `/run/user/<uid>` (socket and lock included)
+/// when the user's last login ends, while the daemon and sessions keep
+/// running. The folder can only be made again once the user logs back in, so
+/// until then the daemon waits. Then it takes the lock again and binds the
+/// socket; if another daemon got there first (a client started one), this one
+/// exits, and that daemon adopts the sessions once their shims have put their
+/// own sockets back.
+///
+/// Returns `true` when this daemon should exit because it was replaced.
+async fn keep_socket(server: Arc<server::Server>, runtime: PathBuf, mut bound: Option<u64>, mut lock_ino: Option<u64>) -> bool {
+    let sock = paths::daemon_socket(&runtime);
+    // The lock taken again after the old file was deleted, and the listener
+    // serving the socket bound again (the first one is served by `run`).
+    let mut relock: Option<std::fs::File> = None;
+    let mut serving: Option<tokio::task::JoinHandle<()>> = None;
+    let mut reported = false;
+    loop {
+        tokio::time::sleep(SOCKET_CHECK_EVERY).await;
+        match inode(&sock) {
+            now if now == bound => {
+                reported = false;
+                continue;
+            }
+            Some(_) => {
+                tracing::warn!("{} now belongs to another swarmd; leaving the sessions to it", sock.display());
+                return true;
+            }
+            None => {}
+        }
+        if let Err(e) = paths::ensure_private_dir_in_place(&runtime) {
+            if !reported {
+                tracing::warn!("{} is gone; waiting for the folder to come back ({e})", sock.display());
+                reported = true;
+            }
+            continue;
+        }
+        // Only the socket may have gone (deleted by hand, or a /tmp cleaner):
+        // the lock file this daemon holds is still there, and taking it a
+        // second time would fail against itself.
+        let lock_path = paths::daemon_lock(&runtime);
+        let relisten = (|| {
+            paths::ensure_private_dir(&paths::shims_dir(&runtime))?;
+            let lock_file = if lock_ino.is_some() && inode(&lock_path) == lock_ino { None } else { Some(lock(&lock_path)?) };
+            if inode(&sock).is_some() {
+                bail!("another swarmd took its place");
+            }
+            let listener = bind(&sock)?;
+            Ok::<_, anyhow::Error>((lock_file, listener))
+        })();
+        match relisten {
+            Ok((lock_file, listener)) => {
+                if let Some(f) = lock_file {
+                    relock = Some(f);
+                    lock_ino = inode(&lock_path);
+                }
+                bound = inode(&sock);
+                *BOUND_INODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = bound;
+                if let Some(old) = serving.replace(tokio::spawn(server.clone().serve(listener))) {
+                    old.abort();
+                }
+                tracing::info!(socket = %sock.display(), "listening again");
+                reported = false;
+            }
+            Err(e) => {
+                tracing::warn!("couldn't put the socket back ({e:#}); leaving the sessions to the other swarmd");
+                drop(relock);
+                return true;
+            }
+        }
+    }
+}
+
+/// Connects to the daemon socket in `runtime`, but only if the folder is this
+/// user's alone and the process listening runs as this user: in a shared
+/// place like `/tmp/swarm-<uid>`, another user could have made the folder
+/// first and be listening there to read what is typed.
+async fn connect_trusted(runtime: &Path) -> Result<UnixStream> {
+    paths::check_private_dir(runtime)?;
+    let s = UnixStream::connect(paths::daemon_socket(runtime)).await?;
+    let peer = s.peer_cred()?;
+    if peer.uid() != paths::uid() {
+        bail!("the daemon socket belongs to uid {}, not this user", peer.uid());
+    }
+    Ok(s)
 }
 
 /// Holds an exclusive `flock` for the life of the process.
@@ -227,15 +372,19 @@ fn lock(path: &Path) -> Result<std::fs::File> {
 }
 
 async fn connect() -> Result<UnixStream> {
-    let sock = paths::daemon_socket(&paths::runtime_dir());
-    let mut s = UnixStream::connect(&sock).await?;
+    let runtime = paths::runtime_dir();
+    let mut s = connect_trusted(&runtime).await?;
     let hello = ClientMsg::Hello {
         proto: PROTOCOL_VERSION,
         client_name: "swarmd".into(),
         client_id: format!("swarmd-{}", std::process::id()),
     };
     write_frame(&mut s, &hello).await?;
-    match read_frame::<_, ServerMsg>(&mut s).await? {
+    // A stopped daemon accepts but never answers.
+    let welcome = tokio::time::timeout(Duration::from_secs(5), read_frame::<_, ServerMsg>(&mut s))
+        .await
+        .context("the daemon didn't answer")??;
+    match welcome {
         Some(ServerMsg::Welcome { proto, .. }) if proto == PROTOCOL_VERSION => Ok(s),
         Some(ServerMsg::Welcome { proto, daemon_version, .. }) => {
             bail!("running daemon {daemon_version} speaks protocol {proto}, expected {PROTOCOL_VERSION}")
@@ -250,8 +399,8 @@ async fn start() -> Result<bool> {
         return Ok(false);
     }
     let log_dir = paths::log_dir();
-    std::fs::create_dir_all(&log_dir)?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(log_dir.join("swarmd.log"))?;
+    paths::ensure_private_dir(&log_dir)?;
+    let log = paths::open_private_append(&log_dir.join("swarmd.log"))?;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
     cmd.arg("run").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(log));
     unsafe {
@@ -311,8 +460,7 @@ async fn status() -> Result<()> {
 
 async fn bridge() -> Result<()> {
     start().await?;
-    let sock = paths::daemon_socket(&paths::runtime_dir());
-    let stream = UnixStream::connect(&sock).await?;
+    let stream = connect_trusted(&paths::runtime_dir()).await?;
     let (mut rd, mut wr) = stream.into_split();
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();

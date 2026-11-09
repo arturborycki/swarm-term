@@ -5,7 +5,7 @@
 //! `SWARM_RUNTIME_DIR` / `SWARM_STATE_DIR` override both (used by tests).
 
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Longest runtime dir that still leaves room for `shims/<ulid>.sock` within
@@ -111,12 +111,32 @@ pub fn close_inherited_fds_except(keep: &[i32]) {
     }
 }
 
-/// Creates `dir` (and parents) and makes sure it is a `0700` directory owned
-/// by the current user.
+/// Like `ensure_private_dir`, but only if `dir`'s parent exists: used to put
+/// a removed runtime folder back without creating folders above it (on Linux
+/// `/run/user/<uid>` is gone, and can't be made by the user, until they log
+/// in again). Fails with `NotFound` while the parent is missing.
+pub fn ensure_private_dir_in_place(dir: &Path) -> io::Result<()> {
+    if !dir.parent().is_some_and(Path::is_dir) {
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} has no parent folder", dir.display())));
+    }
+    ensure_private_dir(dir)
+}
+
+/// Creates `dir` (its parents as needed, `dir` itself as `0700`) and makes
+/// sure it is a real directory, not a symlink, owned by the current user and
+/// closed to others. Another user may have made it first in a shared place
+/// such as `/tmp`; then this fails instead of using their folder.
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let meta = std::fs::metadata(dir)?;
-    if !meta.is_dir() {
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
         return Err(io::Error::other(format!("{} is not a directory", dir.display())));
     }
     if meta.uid() != uid() {
@@ -131,9 +151,64 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Checks, without changing anything, that `dir` is a directory (not a
+/// symlink) owned by the current user that nobody else can enter. Clients
+/// call this before trusting a socket in it: in a shared place such as
+/// `/tmp`, another user could have made the folder and be listening there.
+pub fn check_private_dir(dir: &Path) -> io::Result<()> {
+    let meta = std::fs::symlink_metadata(dir)?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(io::Error::other(format!("{} is not a directory", dir.display())));
+    }
+    if meta.uid() != uid() || meta.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} isn't private to this user (owner uid {}, mode {:o})", dir.display(), meta.uid(), meta.permissions().mode() & 0o777),
+        ));
+    }
+    Ok(())
+}
+
+/// Opens `path` for appending, creating it readable only by this user.
+pub fn open_private_append(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
+    // A file made by an older version may be readable by others.
+    let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+    Ok(f)
+}
+
+/// Writes `bytes` to `path` atomically (a temporary file, then a rename),
+/// readable only by this user.
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&tmp)?;
+    let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+    f.write_all(bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_open_to_others_or_a_symlink_is_not_private() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("run");
+        ensure_private_dir(&dir).unwrap();
+        check_private_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(check_private_dir(&dir).is_err());
+        ensure_private_dir(&dir).unwrap();
+        check_private_dir(&dir).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(check_private_dir(&link).is_err());
+        assert!(ensure_private_dir(&link).is_err());
+    }
 
     #[test]
     fn default_runtime_dir_fits_socket_paths() {

@@ -51,11 +51,13 @@ pub fn status_line() -> String {
 
 /// Deletes spilled output of sessions that are gone (a shim that crashed
 /// can't clean up; without its key the files are unreadable anyway).
-pub fn remove_orphans(live: &[String]) {
+/// `live` is asked about each folder just before it would be deleted, so a
+/// session created meanwhile keeps its own.
+pub fn remove_orphans(live: impl Fn(&str) -> bool) {
     let Ok(entries) = std::fs::read_dir(spill_dir()) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !live.contains(&name) {
+        if !live(&name) {
             tracing::info!(id = %name, "removing spilled output of a session that's gone");
             let _ = std::fs::remove_dir_all(entry.path());
         }

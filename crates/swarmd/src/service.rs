@@ -243,7 +243,10 @@ pub fn install(enable_linger: bool) -> Result<()> {
     if enable_linger && linger() == Some(false) {
         match run(Command::new("loginctl").arg("enable-linger")) {
             Ok(_) => println!("Enabled lingering so sessions survive logout."),
-            Err(e) => println!("Could not enable lingering: {e:#}"),
+            Err(e) => println!(
+                "Could not enable lingering: {e:#}. Where only an administrator may, they can run `sudo loginctl enable-linger {}`.",
+                std::env::var("USER").unwrap_or_else(|_| "<your user>".into())
+            ),
         }
     }
     #[cfg(target_os = "macos")]

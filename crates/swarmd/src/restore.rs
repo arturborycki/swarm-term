@@ -16,11 +16,75 @@ use swarm_proto::{paths, CreateOpts, SessionInfo};
 
 use crate::registry::Registry;
 
+/// How long sessions that were running but not adopted yet at start stay in
+/// the snapshot (longer than the daemon's start-up grace).
+const PENDING_KEPT: Duration = Duration::from_secs(60);
+
 /// UI metadata that belongs to the old process, not the session.
 const PROCESS_META: [&str; 3] = ["warp.session_id", "warp.shell", "created_by"];
 
 fn snapshot_path() -> PathBuf {
     paths::state_dir().join("sessions.snapshot")
+}
+
+/// The boot the snapshot was written in: process ids only mean anything
+/// within one boot.
+fn boot_path() -> PathBuf {
+    paths::state_dir().join("sessions.boot")
+}
+
+/// An id for the current boot of this machine.
+pub fn boot_id() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok().map(|s| s.trim().to_string())
+    }
+    // A UUID made at boot; unlike `kern.boottime`, setting the clock doesn't
+    // change it.
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = [0u8; 64];
+        let mut len = buf.len();
+        let rc = unsafe {
+            libc::sysctlbyname(
+                c"kern.bootsessionuuid".as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 || len == 0 {
+            return None;
+        }
+        let end = buf[..len].iter().position(|&b| b == 0).unwrap_or(len);
+        let id = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+        (!id.is_empty()).then_some(id)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Whether process `pid` exists.
+fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Ids of snapshot sessions that are still running somewhere: their shell
+/// lives on in this boot, though their shim may not be reachable yet (its
+/// socket comes back a few seconds after a logout without lingering).
+pub fn still_running() -> Vec<String> {
+    let same_boot = boot_id().is_some() && std::fs::read_to_string(boot_path()).ok() == boot_id();
+    if !same_boot {
+        return Vec::new();
+    }
+    load().into_iter().filter(|s| process_alive(s.pid)).map(|s| s.id).collect()
 }
 
 fn marker_path() -> PathBuf {
@@ -34,7 +98,7 @@ pub fn is_enabled() -> bool {
 pub fn set_enabled(on: bool) -> Result<()> {
     let marker = marker_path();
     if on {
-        std::fs::create_dir_all(paths::state_dir())?;
+        paths::ensure_private_dir(&paths::state_dir())?;
         std::fs::write(&marker, b"").with_context(|| format!("write {}", marker.display()))
     } else {
         match std::fs::remove_file(&marker) {
@@ -44,14 +108,18 @@ pub fn set_enabled(on: bool) -> Result<()> {
     }
 }
 
-fn save(sessions: &[SessionInfo]) -> Result<()> {
-    let running: Vec<&SessionInfo> = sessions.iter().filter(|s| s.is_running()).collect();
+/// Saves the running sessions, plus `pending`: sessions still running that
+/// haven't been adopted yet, so a restart or reboot right now neither
+/// forgets nor duplicates them.
+fn save(sessions: &[SessionInfo], pending: &[SessionInfo]) -> Result<()> {
+    let mut running: Vec<&SessionInfo> = sessions.iter().filter(|s| s.is_running()).collect();
+    running.extend(pending.iter().filter(|p| !sessions.iter().any(|s| s.id == p.id)));
     let bytes = postcard::to_stdvec(&running)?;
-    let path = snapshot_path();
-    std::fs::create_dir_all(paths::state_dir())?;
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, &path)?;
+    paths::ensure_private_dir(&paths::state_dir())?;
+    paths::write_private(&snapshot_path(), &bytes)?;
+    if let Some(boot) = boot_id() {
+        paths::write_private(&boot_path(), boot.as_bytes())?;
+    }
     Ok(())
 }
 
@@ -62,9 +130,10 @@ fn load() -> Vec<SessionInfo> {
         .unwrap_or_default()
 }
 
-/// Snapshot sessions with no live session of the same id.
-pub fn lost(snapshot: Vec<SessionInfo>, live: &[SessionInfo]) -> Vec<SessionInfo> {
-    snapshot.into_iter().filter(|s| !live.iter().any(|l| l.id == s.id)).collect()
+/// Snapshot sessions with no live session of the same id, leaving out those
+/// still running elsewhere (`running`: see `still_running`).
+pub fn lost(snapshot: Vec<SessionInfo>, live: &[SessionInfo], running: &[String]) -> Vec<SessionInfo> {
+    snapshot.into_iter().filter(|s| !live.iter().any(|l| l.id == s.id) && !running.contains(&s.id)).collect()
 }
 
 /// How to recreate `s`: its shell (or the login shell), folder, name and
@@ -88,9 +157,16 @@ pub fn recreate_opts(s: &SessionInfo) -> CreateOpts {
 }
 
 /// Recreates lost sessions (when enabled), then keeps the snapshot current.
-pub async fn start(registry: &Arc<Registry>) {
+/// `running`: sessions still running though not adopted yet; they are not lost.
+pub async fn start(registry: &Arc<Registry>, running: &[String]) {
+    let snapshot = load();
+    // Still running but not adopted yet: kept in the snapshot for a while.
+    let pending: Vec<SessionInfo> = {
+        let live = registry.list();
+        snapshot.iter().filter(|s| running.contains(&s.id) && !live.iter().any(|l| l.id == s.id)).cloned().collect()
+    };
     if is_enabled() {
-        for s in lost(load(), &registry.list()) {
+        for s in lost(snapshot, &registry.list(), running) {
             match registry.create(recreate_opts(&s)).await {
                 Ok(new) => tracing::info!(old = %s.id, new = %new.id, "restored session after restart"),
                 Err(e) => tracing::warn!(old = %s.id, "couldn't restore session: {e:#}"),
@@ -99,7 +175,11 @@ pub async fn start(registry: &Arc<Registry>) {
     }
     let mut events = registry.subscribe();
     let registry = registry.clone();
-    if let Err(e) = save(&registry.list()) {
+    let keep_pending_until = tokio::time::Instant::now() + PENDING_KEPT;
+    let pending_now = move |pending: &[SessionInfo]| {
+        if tokio::time::Instant::now() < keep_pending_until { pending.to_vec() } else { Vec::new() }
+    };
+    if let Err(e) = save(&registry.list(), &pending) {
         tracing::warn!("couldn't save session snapshot: {e:#}");
     }
     tokio::spawn(async move {
@@ -110,7 +190,7 @@ pub async fn start(registry: &Arc<Registry>) {
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
             while events.try_recv().is_ok() {}
-            if let Err(e) = save(&registry.list()) {
+            if let Err(e) = save(&registry.list(), &pending_now(&pending)) {
                 tracing::warn!("couldn't save session snapshot: {e:#}");
             }
         }
@@ -165,7 +245,19 @@ mod tests {
 
     #[test]
     fn only_sessions_without_a_shim_are_lost() {
-        let lost = lost(vec![session("A", &["zsh"]), session("B", &["zsh"])], &[session("A", &["zsh"])]);
+        let lost = lost(vec![session("A", &["zsh"]), session("B", &["zsh"])], &[session("A", &["zsh"])], &[]);
         assert_eq!(lost.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["B"]);
+    }
+
+    #[test]
+    fn sessions_still_running_elsewhere_are_not_lost() {
+        let snapshot = vec![session("A", &["zsh"]), session("B", &["zsh"])];
+        assert!(lost(snapshot, &[], &["A".into(), "B".into()]).is_empty());
+    }
+
+    #[test]
+    fn this_process_is_alive_and_a_boot_id_exists() {
+        assert!(process_alive(std::process::id()));
+        assert!(boot_id().is_some());
     }
 }

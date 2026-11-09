@@ -45,7 +45,7 @@ const toc = [
       <p>
         Every tab is a <em>session</em>: a shell owned by Swarm's daemon, <code>swarmd</code>, not by the window.
         Closing a tab detaches it; the session keeps running and waits in the sidebar's <strong>detached</strong> list
-        until you reopen it. To end a session for good, choose <strong>Terminate</strong> from its menu, or run
+        until you reopen it. To end a session for good, choose <strong>Terminate</strong> from its menu, or run{' '}
         <code>swarmctl rm</code>.
       </p>
       <ul>
@@ -56,7 +56,7 @@ const toc = [
 
       <h2 id="remote">Remote hosts</h2>
       <p>
-        Click <strong>Connect…</strong> in the sidebar and pick a host from your <code>~/.ssh/config</code>, or type
+        Click <strong>Connect…</strong> in the sidebar and pick a host from your <code>~/.ssh/config</code>, or type{' '}
         <code>user@host[:port]</code>. Swarm connects with your own ssh setup (keys, agent, jump hosts) and offers to
         install <code>swarmd</code> on the host if it isn't there. Hosts can run Linux or macOS.
       </p>
@@ -73,8 +73,11 @@ const toc = [
         move to the new version without restarting.
       </p>
       <p>
-        On a Linux host, sessions end when you log out of it unless lingering is on. To keep them running, run
-        <code>loginctl enable-linger</code> on the host once.
+        On a Linux host, systemd may end your sessions when your last login there ends (for example when your Mac
+        sleeps), unless lingering is on. Turn it on for the host in Settings → Hosts, or run{' '}
+        <code>loginctl enable-linger</code> on the host once. Many servers (Ubuntu, for one) let only an administrator
+        do this over ssh: if you get “Access denied”, ask one to run{' '}
+        <code>sudo loginctl enable-linger &lt;your user&gt;</code>.
       </p>
 
       <h2 id="server-install">Install on a server yourself</h2>
@@ -99,7 +102,7 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
       </ul>
       <p>
         Each archive holds <code>swarmd</code>, <code>swarm-shim</code> and <code>swarmctl</code>. That folder is where the
-        app looks first and keeps up to date, so a server set up this way updates like any other. To use
+        app looks first and keeps up to date, so a server set up this way updates like any other. To use{' '}
         <code>swarmctl</code> there, add the folder to your <code>PATH</code>. To start the daemon at login instead of
         on first use, run <code>swarmctl daemon install-service</code> (a systemd user unit). For a macOS server, connect
         from the app: it installs its own macOS build.
@@ -111,7 +114,7 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
         idlest sessions are trimmed first. Nothing is written to disk by default.
       </p>
       <p>
-        To keep more, turn on <strong>Settings → Daemon → Keep scrollback beyond 16 MB on disk</strong>, or run
+        To keep more, turn on <strong>Settings → Daemon → Keep scrollback beyond 16 MB on disk</strong>, or run{' '}
         <code>swarmd spill on</code>. Output that leaves memory is then saved encrypted, up to 256 MB per session by
         default (<code>--limit-mb N</code> changes it). The key exists only in that session's process, and the files are
         deleted when the session ends or the setting is turned off.

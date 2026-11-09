@@ -7,9 +7,7 @@
 //! unlinked as soon as it's written, so only the inherited descriptor reaches it.
 //! `swarmd` asks for this when it starts and finds shims from another build.
 
-use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -18,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use swarm_proto::{paths, SessionInfo, SessionState, Size};
+use swarm_proto::{SessionInfo, SessionState, Size};
 
 use crate::buffer::{Ring, RingState};
 use crate::session::{BlockHeader, Inner, Session};
@@ -81,8 +79,14 @@ pub struct HandoffCtx {
     pub runtime_dir: PathBuf,
     pub scrollback: usize,
     pub exit_retention: Duration,
-    /// The listening socket the next program keeps serving.
-    pub listen_fd: RawFd,
+    /// The listening socket the next program keeps serving (replaced if the
+    /// shim had to bind its socket again).
+    pub listen_fd: std::sync::atomic::AtomicI32,
+    /// Held while the socket is bound again and through a handoff, so the
+    /// next program never gets a listener that was just replaced.
+    pub rebind: std::sync::Mutex<()>,
+    /// Set once the session is being removed: its socket stays gone.
+    pub closing: std::sync::atomic::AtomicBool,
 }
 
 /// Descriptors and facts the new program is started with.
@@ -118,11 +122,18 @@ pub async fn check_exe(exe: &Path) -> Result<()> {
 pub fn hand_off(session: &Arc<Session>, ctx: &HandoffCtx, exe: &Path) -> anyhow::Error {
     // Stop reading output between reads: unread output stays in the PTY for
     // the next program, and nothing read is lost.
+    let _no_rebind = ctx.rebind.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Until the exec, the child isn't reaped here: if it has exited, the next
+    // program reaps it and reports its real status.
+    let _no_reap = session.reap_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if session.reaped.load(Ordering::Acquire) {
+        return anyhow!("the session has exited");
+    }
     if !session.reader_ctl.pause(Duration::from_secs(2)) {
         session.reader_ctl.resume();
         return anyhow!("the session's output reader didn't stop");
     }
-    let inner = session.inner.lock().unwrap();
+    let mut inner = session.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Input that's been accepted must reach the PTY first.
     let deadline = Instant::now() + Duration::from_secs(2);
     while session.pending_input.load(Ordering::Acquire) > 0 {
@@ -133,7 +144,7 @@ pub fn hand_off(session: &Arc<Session>, ctx: &HandoffCtx, exe: &Path) -> anyhow:
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    let err = match write_state(ctx, &export(&inner)) {
+    let err = match write_state(ctx, &export(&mut inner)) {
         Ok(state) => exec(session, ctx, exe, &state),
         Err(e) => e,
     };
@@ -142,9 +153,10 @@ pub fn hand_off(session: &Arc<Session>, ctx: &HandoffCtx, exe: &Path) -> anyhow:
     err
 }
 
-fn export(inner: &Inner) -> HandoffState {
-    let screen = inner.screen.screen();
-    let (rows, cols) = screen.size();
+fn export(inner: &mut Inner) -> HandoffState {
+    let (rows, cols) = inner.screen.size();
+    let alternate = inner.screen.alternate();
+    let contents = inner.screen.formatted();
     HandoffState {
         version: HANDOFF_VERSION,
         info: inner.info.clone(),
@@ -152,32 +164,65 @@ fn export(inner: &Inner) -> HandoffState {
         sticky: inner.sticky.iter().map(|(n, o, b)| (n.to_string(), *o, b.clone())).collect(),
         pending_precmd: inner.pending_precmd.clone(),
         headers: inner.headers.iter().cloned().collect(),
-        screen: ScreenState { rows, cols, alternate: screen.alternate_screen(), contents: screen.state_formatted() },
+        screen: ScreenState { rows, cols, alternate, contents },
         next_client: inner.next_client,
         spill: inner.spill.as_ref().map(|s| s.export()),
     }
 }
 
-/// Writes `state` to a private file, unlinks it and returns its descriptor.
+/// Puts `state` in anonymous memory and returns its descriptor: the
+/// scrollback (and spill key) it holds never reach the disk. Linux: a
+/// `memfd`. macOS: a POSIX shared-memory object, unlinked at once.
 fn write_state(ctx: &HandoffCtx, state: &HandoffState) -> Result<OwnedFd> {
     let bytes = postcard::to_stdvec(state).context("encode the session's state")?;
-    let path = paths::shims_dir(&ctx.runtime_dir).join(format!("{}.handoff", ctx.id));
-    let _ = std::fs::remove_file(&path);
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-        .with_context(|| format!("create {}", path.display()))?;
-    let written = file.write_all(&bytes).and_then(|_| file.flush());
-    let _ = std::fs::remove_file(&path);
-    written.context("write the session's state")?;
-    Ok(OwnedFd::from(file))
+    let fd = anonymous_memory(&ctx.id, bytes.len()).context("make memory for the session's state")?;
+    unsafe {
+        let p = libc::mmap(std::ptr::null_mut(), bytes.len(), libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd.as_raw_fd(), 0);
+        if p == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error()).context("map the session's state");
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
+        libc::munmap(p, bytes.len());
+    }
+    Ok(fd)
+}
+
+#[cfg(target_os = "linux")]
+fn anonymous_memory(_id: &str, len: usize) -> std::io::Result<OwnedFd> {
+    let fd = unsafe { libc::memfd_create(c"swarm-handoff".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    if unsafe { libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(fd)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn anonymous_memory(id: &str, len: usize) -> std::io::Result<OwnedFd> {
+    // Short (macOS allows 31 bytes), unique and unpredictable.
+    let mut nonce = [0u8; 6];
+    std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut nonce)?;
+    let tag: String = id.chars().rev().take(6).collect();
+    let name = format!("/swh{}{}", tag, swarm_proto::hex::encode(&nonce));
+    let cname = std::ffi::CString::new(name).map_err(std::io::Error::other)?;
+    let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600 as libc::c_uint) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    unsafe { libc::shm_unlink(cname.as_ptr()) };
+    set_cloexec(fd.as_raw_fd(), true);
+    if unsafe { libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(fd)
 }
 
 fn exec(session: &Session, ctx: &HandoffCtx, exe: &Path, state: &OwnedFd) -> anyhow::Error {
-    let fds = [session.master.as_raw_fd(), ctx.listen_fd, state.as_raw_fd()];
+    let fds = [session.master.as_raw_fd(), ctx.listen_fd.load(Ordering::Acquire), state.as_raw_fd()];
     for fd in fds {
         set_cloexec(fd, false);
     }
@@ -239,10 +284,23 @@ pub fn adopt(id: &str, scrollback: usize, adopt: &Adopt) -> Result<Arc<Session>>
 }
 
 fn read_state(fd: RawFd) -> Result<HandoffState> {
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-    file.rewind()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    // Anonymous memory (or, from an older program, an unlinked file): mapped,
+    // since macOS shared memory can't be read with `read`.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let len = file.metadata()?.len() as usize;
+    if len == 0 {
+        bail!("the handed-over state is empty");
+    }
+    let bytes = unsafe {
+        let p = libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, file.as_raw_fd(), 0);
+        if p == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error()).context("map the handed-over state");
+        }
+        let v = std::slice::from_raw_parts(p as *const u8, len).to_vec();
+        libc::munmap(p, len);
+        v
+    };
+    drop(file);
     let (version, _) = postcard::take_from_bytes::<u32>(&bytes).context("decode the format")?;
     match version {
         1 => {
@@ -266,7 +324,7 @@ fn read_state(fd: RawFd) -> Result<HandoffState> {
 
 fn import(state: HandoffState, scrollback: usize) -> Inner {
     let ring = Ring::import(state.ring, scrollback);
-    let mut screen = vt100::Parser::new(state.screen.rows, state.screen.cols, 0);
+    let mut screen = crate::screen::Screen::new(state.screen.rows, state.screen.cols);
     if state.screen.alternate {
         screen.process(b"\x1b[?1049h");
     }
@@ -319,7 +377,7 @@ fn fresh_inner(id: &str, pid: u32, scrollback: usize, size: Size) -> Inner {
         buffer_end: 0,
         alt_screen: false,
     };
-    Inner::new(Ring::new(scrollback), vt100::Parser::new(size.rows, size.cols, 0), info)
+    Inner::new(Ring::new(scrollback), crate::screen::Screen::new(size.rows, size.cols), info)
 }
 
 fn pty_size(fd: RawFd) -> Size {
