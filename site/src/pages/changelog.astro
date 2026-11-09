@@ -4,6 +4,17 @@ import { REPO, REPO_PUBLIC } from '../site';
 
 const releases = [
   {
+    version: '0.1.6',
+    date: '2026-11-09',
+    href: `${REPO}/releases/tag/v0.1.6`,
+    items: [
+      'Logging out of a Linux server without lingering no longer loses sessions or brings back copies of them, and the daemon puts back a socket that was deleted under it.',
+      'A session can no longer lock up: not on output that crashed its screen model, not on heavy typing while its output isn’t read, and a stuck session no longer holds up the others.',
+      'Settings → Hosts has a switch for lingering, which keeps a Linux server’s sessions running after you log out.',
+      'Tighter security: session sockets and files are checked to be private and yours, session settings stay off the command line, host names are checked before they reach ssh, and very long titles are cut.',
+    ],
+  },
+  {
     version: '0.1.5',
     date: '2026-11-06',
     href: `${REPO}/releases/tag/v0.1.5`,
