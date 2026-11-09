@@ -39,12 +39,42 @@ pub struct DaemonInfo {
     pub os: String,
 }
 
-type Pending = HashMap<u64, (oneshot::Sender<Result<Response, String>>, Option<mpsc::UnboundedSender<StreamEvent>>)>;
+type Pending = HashMap<u64, (oneshot::Sender<Result<Response, String>>, Option<StreamTx>)>;
+
+/// Output events an attachment may have waiting before it counts as lagged.
+const STREAM_QUEUE: usize = 4096;
+
+/// The sending side of an attachment. When its queue is full the stream is
+/// dropped and `end` holds the event the attachment reports once it has
+/// drained the queue (`Lagged` from the first output it missed, or `Closed`),
+/// so a slow consumer costs a re-attach instead of unbounded memory.
+#[derive(Clone)]
+struct StreamTx {
+    tx: mpsc::Sender<StreamEvent>,
+    end: Arc<Mutex<Option<StreamEvent>>>,
+}
+
+impl StreamTx {
+    /// Sends `ev`; if the queue is full, keeps `fallback` (the first one) as
+    /// the attachment's last event. Returns whether the queue was full.
+    fn send_or_end(&self, ev: StreamEvent, fallback: impl FnOnce() -> StreamEvent) -> bool {
+        match self.tx.try_send(ev) {
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let mut end = self.end.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if end.is_none() {
+                    *end = Some(fallback());
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+}
 
 struct Shared {
     out: mpsc::Sender<ClientMsg>,
     pending: Mutex<Pending>,
-    streams: Mutex<HashMap<StreamId, mpsc::UnboundedSender<StreamEvent>>>,
+    streams: Mutex<HashMap<StreamId, StreamTx>>,
     events: broadcast::Sender<SessionEvent>,
     next_id: AtomicU64,
     subscribed: tokio::sync::Mutex<bool>,
@@ -61,15 +91,15 @@ pub struct Client {
 impl Client {
     /// Connects to the local daemon, starting it if it isn't running.
     pub async fn connect_local(client_name: &str) -> Result<Client> {
-        let sock = paths::daemon_socket(&paths::runtime_dir());
-        if let Ok(s) = UnixStream::connect(&sock).await {
+        let runtime = paths::runtime_dir();
+        if let Ok(s) = connect_trusted(&runtime).await {
             let (rd, wr) = s.into_split();
             if let Ok(c) = Client::handshake(rd, wr, client_name).await {
                 return Ok(c);
             }
         }
         start_local_daemon().await?;
-        let s = UnixStream::connect(&sock).await.with_context(|| format!("connect {}", sock.display()))?;
+        let s = connect_trusted(&runtime).await?;
         let (rd, wr) = s.into_split();
         Client::handshake(rd, wr, client_name).await
     }
@@ -206,8 +236,9 @@ impl Client {
             }
             // Connection lost: fail everything still waiting.
             s.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
-            for (_, tx) in s.streams.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drain() {
-                let _ = tx.send(StreamEvent::Closed { reason: "connection to daemon lost".into() });
+            for (_, st) in s.streams.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drain() {
+                let closed = || StreamEvent::Closed { reason: "connection to daemon lost".into() };
+                st.send_or_end(closed(), closed);
             }
         });
 
@@ -231,11 +262,7 @@ impl Client {
         let _ = closed.wait_for(|c| *c).await;
     }
 
-    async fn request_with(
-        &self,
-        req: Request,
-        stream_tx: Option<mpsc::UnboundedSender<StreamEvent>>,
-    ) -> Result<Response> {
+    async fn request_with(&self, req: Request, stream_tx: Option<StreamTx>) -> Result<Response> {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.shared.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id, (tx, stream_tx));
@@ -312,12 +339,20 @@ impl Client {
     }
 
     pub async fn attach(&self, id: &str, mode: AttachMode, size: Option<Size>, readonly: bool) -> Result<Attachment> {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(STREAM_QUEUE);
+        let end = Arc::new(Mutex::new(None));
         let req = Request::Attach { id: id.into(), mode, size, readonly };
-        match self.request_with(req, Some(tx)).await? {
-            Response::Attached { stream, info, replay_from, live_from } => {
-                Ok(Attachment { client: self.clone(), stream, info, replay_from, live_from, events: rx, detached: false })
-            }
+        match self.request_with(req, Some(StreamTx { tx, end: end.clone() })).await? {
+            Response::Attached { stream, info, replay_from, live_from } => Ok(Attachment {
+                client: self.clone(),
+                stream,
+                info,
+                replay_from,
+                live_from,
+                events: rx,
+                end,
+                detached: false,
+            }),
             other => bail!("unexpected {other:?}"),
         }
     }
@@ -326,8 +361,18 @@ impl Client {
 impl Shared {
     fn send_stream(&self, stream: StreamId, ev: StreamEvent, last: bool) {
         let mut streams = self.streams.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(tx) = streams.get(&stream) {
-            let _ = tx.send(ev);
+        let Some(st) = streams.get(&stream) else { return };
+        let resume_at = match &ev {
+            StreamEvent::Output { offset, .. } => *offset,
+            StreamEvent::Lagged { resume_at } => *resume_at,
+            _ => 0,
+        };
+        // The consumer fell behind: end the stream; the attachment then
+        // reports `Lagged` from the first output it didn't get.
+        if st.send_or_end(ev, || StreamEvent::Lagged { resume_at }) {
+            streams.remove(&stream);
+            let _ = self.out.try_send(ClientMsg::Detach { stream });
+            return;
         }
         if last {
             streams.remove(&stream);
@@ -341,13 +386,18 @@ pub struct Attachment {
     pub info: SessionInfo,
     pub replay_from: u64,
     pub live_from: u64,
-    events: mpsc::UnboundedReceiver<StreamEvent>,
+    events: mpsc::Receiver<StreamEvent>,
+    /// What to report once the queue is drained, if it overflowed.
+    end: Arc<Mutex<Option<StreamEvent>>>,
     detached: bool,
 }
 
 impl Attachment {
     pub async fn recv(&mut self) -> Option<StreamEvent> {
-        self.events.recv().await
+        match self.events.recv().await {
+            Some(ev) => Some(ev),
+            None => self.end.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take(),
+        }
     }
 
     pub async fn input(&self, data: impl Into<Vec<u8>>) -> Result<()> {
@@ -401,6 +451,9 @@ pub fn resolve<'a>(sessions: &'a [SessionInfo], query: &str) -> Result<&'a Sessi
 /// is a local path to scp, and control characters or whitespace have no
 /// place in a host name.
 pub fn check_ssh_host(host: &str) -> Result<()> {
+    if host.contains("://") {
+        bail!("{host:?}: use user@host (put a port in ~/.ssh/config)");
+    }
     if host.is_empty()
         || host.starts_with('-')
         || host.contains('/')
@@ -409,6 +462,21 @@ pub fn check_ssh_host(host: &str) -> Result<()> {
         bail!("{host:?} is not a host name");
     }
     Ok(())
+}
+
+/// Connects to the daemon socket in `runtime`, but only if the folder is this
+/// user's alone and the listening process runs as this user. In a shared
+/// place such as `/tmp/swarm-<uid>` (Linux without `XDG_RUNTIME_DIR`), another
+/// user could otherwise make the folder first and read everything typed.
+async fn connect_trusted(runtime: &std::path::Path) -> Result<UnixStream> {
+    paths::check_private_dir(runtime)?;
+    let sock = paths::daemon_socket(runtime);
+    let s = UnixStream::connect(&sock).await.with_context(|| format!("connect {}", sock.display()))?;
+    let peer = s.peer_cred()?;
+    if peer.uid() != paths::uid() {
+        bail!("{} belongs to uid {}, not this user", sock.display(), peer.uid());
+    }
+    Ok(s)
 }
 
 /// A remote shell command running `swarmd <args>` from the per-user install

@@ -1,7 +1,9 @@
 //! Client connections: requests, event subscriptions and attachment relays.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use swarm_proto::{
     read_frame, write_frame, ClientDesc, ClientMsg, Request, Response, ServerMsg, SessionEvent, ShimInput, ShimMsg, StreamId,
@@ -73,7 +75,23 @@ impl Server {
         let (out_tx, mut out_rx) = mpsc::channel::<ServerMsg>(OUTBOUND_QUEUE);
         let writer = tokio::spawn(async move {
             while let Some(msg) = out_rx.recv().await {
-                if write_frame(&mut wr, &msg).await.is_err() {
+                let bytes = match swarm_proto::frame::encode(&msg) {
+                    Ok(b) => b,
+                    // Too big for one frame: answer the request with an error
+                    // rather than dropping the whole connection.
+                    Err(e) => {
+                        tracing::warn!("couldn't send a message to a client: {e}");
+                        let ServerMsg::Response { id, .. } = msg else { continue };
+                        let reply = ServerMsg::Response { id, result: Err(format!("the answer is too large to send: {e}")) };
+                        match swarm_proto::frame::encode(&reply) {
+                            Ok(b) => b,
+                            Err(_) => continue,
+                        }
+                    }
+                };
+                if tokio::io::AsyncWriteExt::write_all(&mut wr, &bytes).await.is_err()
+                    || tokio::io::AsyncWriteExt::flush(&mut wr).await.is_err()
+                {
                     break;
                 }
             }
@@ -82,6 +100,7 @@ impl Server {
         let mut streams: HashMap<StreamId, mpsc::Sender<ShimInput>> = HashMap::new();
         let mut next_stream: StreamId = 1;
         let mut tasks = Vec::new();
+        let mut subscribed = false;
 
         while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
             // A connection can live for weeks (the app lists sessions every
@@ -90,13 +109,18 @@ impl Server {
             match msg {
                 ClientMsg::Hello { .. } => {}
                 ClientMsg::Input { stream, data } => {
+                    // A stream whose relay has ended is dropped.
                     if let Some(tx) = streams.get(&stream) {
-                        let _ = tx.send(ShimInput::Input(data)).await;
+                        if tx.send(ShimInput::Input(data)).await.is_err() {
+                            streams.remove(&stream);
+                        }
                     }
                 }
                 ClientMsg::Resize { stream, size } => {
                     if let Some(tx) = streams.get(&stream) {
-                        let _ = tx.send(ShimInput::Resize(size)).await;
+                        if tx.send(ShimInput::Resize(size)).await.is_err() {
+                            streams.remove(&stream);
+                        }
                     }
                 }
                 ClientMsg::Detach { stream } => {
@@ -116,7 +140,12 @@ impl Server {
                         relay(registry, out, id, stream, sid, desc, mode, size, in_rx).await;
                     }));
                 }
+                ClientMsg::Request { id, req: Request::Subscribe } if subscribed => {
+                    // One subscription per connection is enough.
+                    let _ = out_tx.send(ServerMsg::Response { id, result: Ok(Response::Ok) }).await;
+                }
                 ClientMsg::Request { id, req: Request::Subscribe } => {
+                    subscribed = true;
                     let mut events = self.registry.subscribe();
                     let registry = self.registry.clone();
                     let out = out_tx.clone();
@@ -223,51 +252,34 @@ async fn relay(
 
     // Where the client's stream has got to, so it can carry on from there
     // if the shim connection ends because the shim was updated in place.
-    let mut next = att.replay_from;
+    let next = Arc::new(AtomicU64::new(att.replay_from));
+    let exited = Arc::new(AtomicBool::new(false));
     let mut size = size;
-    let mut exited = false;
     let mut conn = att.stream;
+    // Input that arrived while the shim was being updated, for its new program.
+    let mut held: Vec<ShimInput> = Vec::new();
     let reason = loop {
-        let (mut shim_rd, mut shim_wr) = conn.into_split();
-        // Frames are read in a task so a partial read is never cancelled.
-        let (frames_tx, mut frames) = mpsc::channel::<Result<ShimMsg, String>>(64);
-        let reader = tokio::spawn(async move {
-            loop {
-                let (frame, last) = match read_frame::<_, ShimMsg>(&mut shim_rd).await {
-                    Ok(Some(msg)) => (Ok(msg), false),
-                    Ok(None) => (Err("detached".to_string()), true),
-                    Err(e) => (Err(format!("session connection lost: {e}")), true),
-                };
-                if frames_tx.send(frame).await.is_err() || last {
-                    break;
-                }
-            }
-        });
+        let (shim_rd, mut shim_wr) = conn.into_split();
+        let mut detached = false;
+        for msg in held.drain(..) {
+            detached |= matches!(msg, ShimInput::Detach);
+            let _ = write_frame(&mut shim_wr, &msg).await;
+        }
+        if detached {
+            break None;
+        }
+        // Output goes to the client in its own task. If this loop waited on a
+        // slow client while the shim waited on this loop to take input, the
+        // two would wait on each other for good.
+        let mut output = tokio::spawn(forward_output(shim_rd, out.clone(), stream, next.clone(), exited.clone()));
         // `Some(reason)`: the shim connection ended; `None`: the client is
         // done (detached, gone, or told to resume itself after lagging).
         let ended: Option<String> = loop {
             tokio::select! {
-                frame = frames.recv() => match frame {
-                    Some(Ok(ShimMsg::Output { offset, data, replay })) => {
-                        next = offset + data.len() as u64;
-                        // Blocking here when the client is slow lets the shim's
-                        // queue fill, which turns into `Lagged` instead of
-                        // unbounded memory.
-                        if out.send(ServerMsg::Output { stream, offset, data, replay }).await.is_err() {
-                            break None;
-                        }
-                    }
-                    Some(Ok(ShimMsg::Exited { code, signal })) => {
-                        exited = true;
-                        let _ = out.send(ServerMsg::Exited { stream, code, signal }).await;
-                    }
-                    Some(Ok(ShimMsg::Lagged { resume_at })) => {
-                        let _ = out.send(ServerMsg::Lagged { stream, resume_at }).await;
-                        break None;
-                    }
-                    Some(Ok(_)) => {}
-                    Some(Err(reason)) => break Some(reason),
-                    None => break Some("detached".to_string()),
+                end = &mut output => break match end {
+                    Ok(OutputEnd::Shim(reason)) => Some(reason),
+                    Ok(OutputEnd::Client) => None,
+                    Err(_) => Some("detached".to_string()),
                 },
                 msg = input.recv() => match msg {
                     Some(msg) => {
@@ -275,28 +287,45 @@ async fn relay(
                             size = Some(*s);
                         }
                         let detach = matches!(msg, ShimInput::Detach);
+                        // While the shim is being updated, input waits here,
+                        // and goes to its new program if the update happened.
+                        if registry.input_paused(&session_id) {
+                            while registry.input_paused(&session_id) {
+                                let _ = tokio::time::timeout(PAUSE_POLL, registry.wait_unpaused()).await;
+                            }
+                            if output.is_finished() {
+                                held.push(msg);
+                                continue;
+                            }
+                        }
                         // A failed write shows up as the connection ending.
                         let _ = write_frame(&mut shim_wr, &msg).await;
                         if detach {
+                            output.abort();
                             break None;
                         }
                     }
-                    None => break None,
+                    None => {
+                        output.abort();
+                        break None;
+                    }
                 },
             }
         };
-        reader.abort();
         let Some(reason) = ended else { break None };
         // A shim updated in place keeps its socket: carry on from `next` on
         // its new program, unnoticed by the client.
-        if !exited {
-            let resumed = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                registry.attach(&session_id, desc.clone(), swarm_proto::AttachMode::ResumeFrom(next), size),
-            )
-            .await;
-            if let Ok(Ok(att)) = resumed {
-                tracing::debug!(session_id, next, "resumed the stream after the shim was updated");
+        if !exited.load(Ordering::Acquire) {
+            let from = next.load(Ordering::Acquire);
+            let resumed = registry.attach_within(
+                &session_id,
+                desc.clone(),
+                swarm_proto::AttachMode::ResumeFrom(from),
+                size,
+                RESUME_TIMEOUT,
+            );
+            if let Ok(att) = resumed.await {
+                tracing::debug!(session_id, from, "resumed the stream after the shim was updated");
                 conn = att.stream;
                 continue;
             }
@@ -305,6 +334,52 @@ async fn relay(
     };
     if let Some(reason) = reason {
         let _ = out.send(ServerMsg::StreamClosed { stream, reason }).await;
+    }
+}
+
+/// How long a stream waits for a shim updated in place to take it back.
+const RESUME_TIMEOUT: Duration = Duration::from_secs(20);
+/// How often paused input checks again (a missed wake-up costs this much).
+const PAUSE_POLL: Duration = Duration::from_millis(200);
+
+/// How forwarding a shim's output ended.
+enum OutputEnd {
+    /// The shim connection ended (an in-place update, or the session went).
+    Shim(String),
+    /// The client is gone, or was told to resume after lagging.
+    Client,
+}
+
+/// Sends a shim connection's output to the client, noting where it got to.
+async fn forward_output(
+    mut shim_rd: tokio::net::unix::OwnedReadHalf,
+    out: mpsc::Sender<ServerMsg>,
+    stream: StreamId,
+    next: Arc<AtomicU64>,
+    exited: Arc<AtomicBool>,
+) -> OutputEnd {
+    loop {
+        match read_frame::<_, ShimMsg>(&mut shim_rd).await {
+            Ok(Some(ShimMsg::Output { offset, data, replay })) => {
+                next.store(offset + data.len() as u64, Ordering::Release);
+                // Waiting here when the client is slow lets the shim's queue
+                // fill, which turns into `Lagged` instead of unbounded memory.
+                if out.send(ServerMsg::Output { stream, offset, data, replay }).await.is_err() {
+                    return OutputEnd::Client;
+                }
+            }
+            Ok(Some(ShimMsg::Exited { code, signal })) => {
+                exited.store(true, Ordering::Release);
+                let _ = out.send(ServerMsg::Exited { stream, code, signal }).await;
+            }
+            Ok(Some(ShimMsg::Lagged { resume_at })) => {
+                let _ = out.send(ServerMsg::Lagged { stream, resume_at }).await;
+                return OutputEnd::Client;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return OutputEnd::Shim("detached".to_string()),
+            Err(e) => return OutputEnd::Shim(format!("session connection lost: {e}")),
+        }
     }
 }
 

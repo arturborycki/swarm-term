@@ -34,4 +34,6 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ulid = "1"
-vte = "0.15"
+# Without `std`, vte keeps OSC data in a fixed buffer: a huge title in the
+# output can't grow the shim without bound.
+vte = { version = "0.15", default-features = false }

@@ -95,7 +95,7 @@ impl Drop for Env {
         .unwrap();
         // Any shim left (its socket missing at this moment, e.g. after a test
         // removed the runtime folder) would otherwise outlive the test.
-        let _ = Command::new("pkill").args(["-f", &format!("--runtime-dir {}", self.runtime().display())]).status();
+        let _ = Command::new("pkill").args(["-f", &format!("runtime-dir {}", self.runtime().display())]).status();
     }
 }
 
@@ -394,7 +394,8 @@ async fn a_shim_program_that_refuses_the_handoff_leaves_the_session_alone() {
     };
     // A daemon whose shim program can't take sessions over.
     let refusing = env.dir.path().join("refusing-shim");
-    std::fs::write(&refusing, "#!/bin/sh\nexit 1\n").unwrap();
+    // It reports another build, so the daemon tries to move sessions to it.
+    std::fs::write(&refusing, "#!/bin/sh\n[ \"$1\" = --build-id ] && { echo other-build; exit 0; }\nexit 1\n").unwrap();
     std::fs::set_permissions(&refusing, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     env.kill_daemon();
     env.vars = vec![("SWARM_SHIM_PATH", refusing.display().to_string())];
@@ -1227,4 +1228,113 @@ async fn a_logout_without_lingering_neither_duplicates_nor_loses_sessions() {
     let _ = old.kill();
     let _ = old.wait();
     assert!(old_alive != new_alive, "exactly one daemon must be left (old {old_alive}, new {new_alive})");
+}
+
+/// Output can set a title of any size; the session must stay listed, and
+/// listing must keep working, however big the titles are.
+#[tokio::test]
+async fn huge_titles_neither_hide_sessions_nor_break_listing() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let mut ids = Vec::new();
+    for n in 0..3 {
+        let mut opts = sh_opts(&format!("big-{n}"));
+        opts.command = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "head -c 7000000 /dev/zero | tr '\\0' x > /tmp/.swt$$; printf '\\033]2;'; cat /tmp/.swt$$; printf '\\007'; rm /tmp/.swt$$; echo done; sleep 600".into(),
+        ];
+        ids.push(c.create(opts).await.unwrap().id);
+    }
+    // Let them print.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let listed = c.list().await.expect("listing failed");
+    for id in &ids {
+        let s = listed.iter().find(|s| &s.id == id).expect("a session went missing");
+        assert!(s.title.len() <= 4096, "title kept at {} bytes", s.title.len());
+    }
+}
+
+/// Deleting only the socket (by hand, or a cleaner in /tmp) must not make
+/// the daemon exit: it puts the socket back.
+#[tokio::test]
+async fn the_daemon_puts_back_a_deleted_socket_and_keeps_running() {
+    let mut env = Env::new().await;
+    let info = env.client().await.create(sh_opts("stay")).await.unwrap();
+    std::fs::remove_file(paths::daemon_socket(&env.runtime())).unwrap();
+    let c = wait_listed(&env, &info.id, 15).await;
+    assert!(env.daemon.as_mut().unwrap().try_wait().unwrap().is_none(), "the daemon exited");
+    let mut a = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    a.input(b"echo back-$((3*3))\n".to_vec()).await.unwrap();
+    read_until(&mut a, "back-9").await;
+}
+
+/// A client that sends a lot while not reading its output used to wedge the
+/// stream for good: the daemon waited on the client, the shim on the daemon,
+/// and the daemon on the shim. A raw client, so nothing reads behind its back.
+#[tokio::test]
+async fn heavy_input_while_output_is_not_read_does_not_wedge() {
+    use swarm_proto::{read_frame, ClientMsg, Request, ServerMsg};
+    let env = Env::new().await;
+    let mut opts = sh_opts("echoer");
+    // Echo on: twice as much output as input.
+    opts.command = vec!["/bin/sh".into(), "-c".into(), "stty -icanon; exec cat".into()];
+    let info = env.client().await.create(opts).await.unwrap();
+
+    let s = UnixStream::connect(paths::daemon_socket(&env.runtime())).await.unwrap();
+    let (mut rd, mut wr) = s.into_split();
+    write_frame(&mut wr, &ClientMsg::Hello { proto: swarm_proto::PROTOCOL_VERSION, client_name: "raw".into(), client_id: "raw".into() })
+        .await
+        .unwrap();
+    let _welcome: Option<ServerMsg> = read_frame(&mut rd).await.unwrap();
+    let attach = Request::Attach { id: info.id.clone(), mode: AttachMode::Live, size: None, readonly: false };
+    write_frame(&mut wr, &ClientMsg::Request { id: 1, req: attach }).await.unwrap();
+    let stream = loop {
+        match read_frame::<_, ServerMsg>(&mut rd).await.unwrap() {
+            Some(ServerMsg::Response { result: Ok(swarm_proto::Response::Attached { stream, .. }), .. }) => break stream,
+            Some(_) => {}
+            None => panic!("connection closed"),
+        }
+    };
+    // Send 12 MB while reading nothing; then read, slowly.
+    let writer = tokio::spawn(async move {
+        let line = [vec![b'y'; 511], vec![b'\n']].concat();
+        for _ in 0..24_000 {
+            if write_frame(&mut wr, &ClientMsg::Input { stream, data: line.clone() }).await.is_err() {
+                break;
+            }
+        }
+        let _ = write_frame(&mut wr, &ClientMsg::Input { stream, data: b"END-MARK\n".to_vec() }).await;
+        wr
+    });
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let found = timeout(Duration::from_secs(60), async {
+        let mut tail = Vec::new();
+        loop {
+            match read_frame::<_, ServerMsg>(&mut rd).await {
+                Ok(Some(ServerMsg::Output { data, .. })) => {
+                    tokio::time::sleep(Duration::from_micros(300)).await;
+                    tail.extend_from_slice(&data);
+                    if tail.windows(8).any(|w| w == b"END-MARK") {
+                        return true;
+                    }
+                    let keep = tail.len().saturating_sub(16);
+                    tail.drain(..keep);
+                }
+                // Told to resume: the stream moved on; good enough here.
+                Ok(Some(ServerMsg::Lagged { .. })) => return true,
+                Ok(Some(_)) => {}
+                _ => return false,
+            }
+        }
+    })
+    .await;
+    assert_eq!(found, Ok(true), "the stream wedged");
+    let wr = timeout(Duration::from_secs(10), writer).await.expect("sending never finished").unwrap();
+    drop(wr);
+    // The session still takes input from a new client.
+    let c2 = env.client().await;
+    let mut b = c2.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    b.input(b"second\n".to_vec()).await.unwrap();
+    read_until(&mut b, "second").await;
 }

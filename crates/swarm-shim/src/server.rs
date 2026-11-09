@@ -180,26 +180,36 @@ async fn handle(
                         }
                     }
                 });
-                loop {
+                // Output is written in its own task, so input is always read:
+                // if this loop waited on a slow reader while `swarmd` waited
+                // on it to take input, both would wait for good.
+                let mut rx = std::mem::replace(&mut att.rx, mpsc::channel(1).1);
+                let lag = att.lag.clone();
+                let mut writer = tokio::spawn(async move {
+                    while let Some(msg) = rx.recv().await {
+                        write_frame(&mut wr, &msg).await?;
+                    }
+                    let lagged = lag.load(std::sync::atomic::Ordering::Acquire);
+                    if lagged != u64::MAX {
+                        write_frame(&mut wr, &ShimMsg::Lagged { resume_at: lagged }).await?;
+                    }
+                    Ok::<_, std::io::Error>(())
+                });
+                let result = loop {
                     tokio::select! {
-                        out = att.rx.recv() => match out {
-                            Some(msg) => write_frame(&mut wr, &msg).await?,
-                            None => {
-                                if let Some(resume_at) = att.lagged_at() {
-                                    write_frame(&mut wr, &ShimMsg::Lagged { resume_at }).await?;
-                                }
-                                break;
-                            }
-                        },
+                        done = &mut writer => break done.unwrap_or(Ok(())),
                         input = in_rx.recv() => match input {
                             Some(ShimInput::Input(data)) => session.input(client_id, data),
                             Some(ShimInput::Resize(size)) => session.client_resize(client_id, size),
-                            Some(ShimInput::Detach) | None => break,
+                            Some(ShimInput::Detach) | None => {
+                                writer.abort();
+                                break Ok(());
+                            }
                         },
                     }
-                }
+                };
                 reader.abort();
-                Ok::<_, std::io::Error>(())
+                result
             }
             .await;
             session.detach(client_id);

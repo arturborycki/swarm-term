@@ -24,8 +24,20 @@ const SHIM_TIMEOUT: Duration = Duration::from_secs(5);
 const SHIM_SLOW_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long to wait for a known session's socket to come back.
 const SOCKET_RETURN_WAIT: Duration = Duration::from_millis(3500);
+/// Longest wait between tries to adopt a shim that doesn't answer.
+const RETRY_MAX: Duration = Duration::from_secs(60);
+/// How long a removed session is kept from being adopted again.
+const REMOVED_KEPT: Duration = Duration::from_secs(15);
 /// How often the shims folder is checked for sockets the daemon doesn't know.
 const RESCAN_EVERY: Duration = Duration::from_secs(3);
+
+/// The build of the `swarm-shim` program at `exe` (`--build-id`), or `None`
+/// for a program from before it could say.
+fn shim_build(exe: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new(exe).arg("--build-id").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !id.is_empty()).then_some(id)
+}
 
 /// Runs `fut`, failing if it takes longer than `limit`.
 async fn timed<T>(limit: Duration, fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
@@ -48,8 +60,21 @@ fn is_stale(e: &anyhow::Error) -> bool {
 pub struct Registry {
     runtime: PathBuf,
     shim_exe: PathBuf,
+    /// The build of `shim_exe`; `None` for one too old to say (it reads
+    /// session options only from its command line).
+    shim_build: Option<String>,
     sessions: Mutex<HashMap<SessionId, SessionInfo>>,
     events: broadcast::Sender<SessionEvent>,
+    /// Sessions whose shim is being updated in place: relays hold input
+    /// until it's done, so no keystroke is lost in the switch.
+    paused: Mutex<std::collections::HashSet<SessionId>>,
+    unpaused: tokio::sync::Notify,
+    /// Shims that didn't answer: when to try each again, and the delay.
+    retries: Mutex<HashMap<SessionId, (tokio::time::Instant, Duration)>>,
+    /// Sessions just removed, so a rescan doesn't adopt them again.
+    removed: Mutex<HashMap<SessionId, std::time::Instant>>,
+    /// The start-up pass (shim updates, spill) is done.
+    started: std::sync::atomic::AtomicBool,
 }
 
 /// An open attachment to a shim, before the relay starts.
@@ -63,7 +88,46 @@ pub struct ShimAttachment {
 impl Registry {
     pub fn new(runtime: PathBuf, shim_exe: PathBuf) -> Arc<Registry> {
         let (events, _) = broadcast::channel(1024);
-        Arc::new(Registry { runtime, shim_exe, sessions: Mutex::new(HashMap::new()), events })
+        let shim_build = shim_build(&shim_exe);
+        match &shim_build {
+            Some(b) if b != swarm_proto::BUILD_ID => {
+                tracing::warn!("{} is from build {b}, this daemon from {}", shim_exe.display(), swarm_proto::BUILD_ID)
+            }
+            None => tracing::warn!("{} is from an older build; new sessions use it the old way", shim_exe.display()),
+            _ => {}
+        }
+        Arc::new(Registry {
+            runtime,
+            shim_exe,
+            shim_build,
+            sessions: Mutex::new(HashMap::new()),
+            events,
+            paused: Mutex::new(Default::default()),
+            unpaused: tokio::sync::Notify::new(),
+            retries: Mutex::new(HashMap::new()),
+            removed: Mutex::new(HashMap::new()),
+            started: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Whether input for session `id` should wait (its shim is being updated).
+    pub fn input_paused(&self, id: &str) -> bool {
+        self.paused.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(id)
+    }
+
+    /// Resolves when some paused session is resumed.
+    pub async fn wait_unpaused(&self) {
+        self.unpaused.notified().await
+    }
+
+    fn set_paused(&self, id: &str, on: bool) {
+        let mut paused = self.paused.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if on {
+            paused.insert(id.to_string());
+        } else {
+            paused.remove(id);
+            self.unpaused.notify_waiters();
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
@@ -72,20 +136,29 @@ impl Registry {
 
     /// Re-adopts every shim still running from a previous daemon, all at once
     /// and each within `SHIM_TIMEOUT`, so a shim that doesn't answer can't
-    /// hold up the others or the daemon's start.
-    pub async fn adopt_existing(self: &Arc<Self>) -> Result<()> {
+    /// hold up the others or the daemon's start. A socket nobody listens on
+    /// is removed, unless its session's shell is still running (`alive`):
+    /// its shim may only be stopped.
+    pub async fn adopt_existing(self: &Arc<Self>, alive: &[String]) -> Result<()> {
         paths::ensure_private_dir(&paths::shims_dir(&self.runtime))?;
-        self.adopt_new().await;
+        self.adopt_sockets(Some(alive)).await;
         Ok(())
     }
 
     /// Adopts shims whose sockets appeared since the last look: a shim that
     /// had to put its socket back (systemd removes `/run/user/<uid>` at the
-    /// last logout), or one a previous daemon left. Sockets nobody listens on
-    /// are removed; a shim that doesn't answer is tried again next time.
-    pub async fn adopt_new(self: &Arc<Self>) {
+    /// last logout), or one that didn't answer before. Returns the sessions
+    /// adopted. Sockets are never removed here: a shim that doesn't answer
+    /// may just be stopped, and on macOS a full accept queue looks the same
+    /// as nobody listening. It's tried again later, less and less often.
+    pub async fn adopt_new(self: &Arc<Self>) -> Vec<String> {
+        self.adopt_sockets(None).await
+    }
+
+    async fn adopt_sockets(self: &Arc<Self>, startup: Option<&[String]>) -> Vec<String> {
         let dir = paths::shims_dir(&self.runtime);
-        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+        let now = tokio::time::Instant::now();
         let mut tasks = tokio::task::JoinSet::new();
         for entry in entries.flatten() {
             let path = entry.path();
@@ -95,19 +168,56 @@ impl Registry {
             if self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(id) {
                 continue;
             }
+            // Just removed (an older shim deletes its socket after answering).
+            if self.recently_removed(id) {
+                continue;
+            }
+            let retry = self.retries.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).copied();
+            if startup.is_none() && retry.is_some_and(|(at, _)| now < at) {
+                continue;
+            }
+            let remove_if_stale = startup.map(|alive| !alive.iter().any(|a| a == id));
             let (this, id) = (self.clone(), id.to_string());
             tasks.spawn(async move {
                 match this.adopt(&id).await {
-                    Ok(info) => tracing::info!(id, pid = info.pid, "adopted session"),
-                    Err(e) if is_stale(&e) => {
+                    Ok((info, true)) => {
+                        tracing::info!(id, pid = info.pid, "adopted session");
+                        this.retries.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id);
+                        Some(id)
+                    }
+                    Ok((_, false)) => None,
+                    Err(e) if is_stale(&e) && remove_if_stale == Some(true) => {
                         tracing::info!(id, "removing stale shim socket: {e:#}");
                         let _ = std::fs::remove_file(&path);
+                        None
                     }
-                    Err(e) => tracing::warn!(id, "couldn't adopt session, will try again: {e:#}"),
+                    Err(e) => {
+                        let mut retries = this.retries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let delay = retries.get(&id).map_or(RESCAN_EVERY, |(_, d)| (*d * 2).min(RETRY_MAX));
+                        retries.insert(id.clone(), (tokio::time::Instant::now() + delay, delay));
+                        tracing::warn!(id, "couldn't adopt session, trying again in {} s: {e:#}", delay.as_secs());
+                        None
+                    }
                 }
             });
         }
-        while tasks.join_next().await.is_some() {}
+        let mut adopted = Vec::new();
+        while let Some(r) = tasks.join_next().await {
+            adopted.extend(r.ok().flatten());
+        }
+        adopted
+    }
+
+    fn recently_removed(&self, id: &str) -> bool {
+        let mut removed = self.removed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        removed.retain(|_, at| at.elapsed() < REMOVED_KEPT);
+        removed.contains_key(id)
+    }
+
+    /// Marks the start-up pass done: shims adopted later get this daemon's
+    /// shim program and spill setting as they come.
+    pub fn startup_done(&self) {
+        self.started.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Session ids with a socket in the shims folder, adopted or not.
@@ -123,12 +233,26 @@ impl Registry {
     pub async fn watch_shims_dir(self: Arc<Self>) {
         loop {
             tokio::time::sleep(RESCAN_EVERY).await;
-            self.adopt_new().await;
+            let adopted = self.adopt_new().await;
+            if !self.started.load(std::sync::atomic::Ordering::Acquire) {
+                continue;
+            }
+            // Late, so missed by the start-up pass: update and configure them.
+            let cfg = crate::spill::config();
+            for id in adopted {
+                let Some(info) = self.list().into_iter().find(|s| s.id == id) else { continue };
+                let outcome = self.upgrade_shim(&info, false).await;
+                tracing::info!(id, "shim of a session adopted late: {outcome:?}");
+                if info.is_running() {
+                    let _ = self.simple(&id, ShimRequest::SetSpill(cfg.clone())).await;
+                }
+            }
         }
     }
 
-    /// Starts watching a shim and returns its current info.
-    async fn adopt(self: &Arc<Self>, id: &str) -> Result<SessionInfo> {
+    /// Starts watching a shim and returns its current info, and whether this
+    /// call adopted it (`false`: something else just did).
+    async fn adopt(self: &Arc<Self>, id: &str) -> Result<(SessionInfo, bool)> {
         let (stream, info) = timed(SHIM_TIMEOUT, async {
             let mut stream = self.connect(id).await?;
             write_frame(&mut stream, &ShimRequest::Watch).await?;
@@ -142,11 +266,12 @@ impl Registry {
         {
             let mut sessions = self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if sessions.contains_key(id) {
-                return Ok(info);
+                return Ok((info, false));
             }
             sessions.insert(id.to_string(), info.clone());
         }
         let _ = self.events.send(SessionEvent::Created(info.clone()));
+        let adopted = info.clone();
 
         let this = self.clone();
         let id = id.to_string();
@@ -174,7 +299,7 @@ impl Registry {
             // The shim is gone: removed, or its exit retention passed.
             this.forget(&id);
         });
-        Ok(info)
+        Ok((adopted, true))
     }
 
     /// Watches a shim again after its watch connection ended, if it's still
@@ -244,11 +369,30 @@ impl Registry {
                 "its shim predates in-place updates; it moves to the new build when the session is restarted".into(),
             );
         };
-        if build == swarm_proto::BUILD_ID && !force {
+        // Sessions move to this daemon's `swarm-shim` program, never to one
+        // older than they run (a half-finished install).
+        let Some(target) = &self.shim_build else {
+            return ShimUpgradeOutcome::Skipped(format!(
+                "{} is from an older build than this daemon; the session stays on its shim",
+                self.shim_exe.display()
+            ));
+        };
+        if build == *target && !force {
             return ShimUpgradeOutcome::UpToDate;
         }
         let exe = self.shim_exe.display().to_string();
-        if let Err(e) = self.simple(&info.id, ShimRequest::Upgrade { exe }).await {
+        // Hold new input in the relays, and give what's on its way a moment
+        // to reach the shim: the switch must not drop keystrokes.
+        self.set_paused(&info.id, true);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let outcome = self.switch_program(&info.id, exe, generation).await;
+        self.set_paused(&info.id, false);
+        outcome
+    }
+
+    /// Asks the shim to replace its program and waits until it has.
+    async fn switch_program(&self, id: &str, exe: String, generation: u32) -> ShimUpgradeOutcome {
+        if let Err(e) = self.simple(id, ShimRequest::Upgrade { exe }).await {
             return ShimUpgradeOutcome::Failed(format!("{e:#}"));
         }
         // The shim answered and is switching programs; the new one answers
@@ -256,7 +400,7 @@ impl Registry {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            if let Ok((_, _, now)) = self.shim_version(&info.id).await {
+            if let Ok((_, _, now)) = self.shim_version(id).await {
                 if now > generation {
                     return ShimUpgradeOutcome::Upgraded;
                 }
@@ -279,9 +423,10 @@ impl Registry {
         // The options (command, folder, environment, names) go through a pipe,
         // not the command line, where other users could read them with `ps`.
         let encoded = postcard::to_stdvec(&opts)?;
+        // An older `swarm-shim` only reads them from its command line.
+        let legacy_opts = self.shim_build.is_none().then(|| swarm_proto::hex::encode(&encoded));
         let log_dir = paths::log_dir();
-        std::fs::create_dir_all(&log_dir).ok();
-        let log = std::fs::OpenOptions::new().create(true).append(true).open(log_dir.join("shims.log"));
+        let log = paths::ensure_private_dir(&log_dir).and_then(|_| paths::open_private_append(&log_dir.join("shims.log")));
         let stderr = match log {
             Ok(f) => Stdio::from(f),
             Err(_) => Stdio::null(),
@@ -291,8 +436,11 @@ impl Registry {
         cmd.arg("--id")
             .arg(&id)
             .arg("--runtime-dir")
-            .arg(&self.runtime)
-            .arg("--opts-stdin");
+            .arg(&self.runtime);
+        match &legacy_opts {
+            Some(hex) => cmd.arg("--opts").arg(hex),
+            None => cmd.arg("--opts-stdin"),
+        };
         if let Some(cfg) = crate::spill::config() {
             cmd.arg("--spill-dir").arg(&cfg.dir).arg("--spill-limit").arg(cfg.limit.to_string());
         }
@@ -310,7 +458,7 @@ impl Registry {
             });
         }
         let mut child = cmd.spawn().with_context(|| format!("spawn {}", self.shim_exe.display()))?;
-        if let Some(mut stdin) = child.stdin.take() {
+        if let Some(mut stdin) = child.stdin.take().filter(|_| legacy_opts.is_none()) {
             // A thread, so a large environment can't block the runtime.
             std::thread::spawn(move || {
                 use std::io::Write;
@@ -319,7 +467,8 @@ impl Registry {
         }
 
         let sock = paths::shim_socket(&self.runtime, &id);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // A newly installed program's first start can be slow on macOS.
+        let deadline = tokio::time::Instant::now() + SHIM_SLOW_TIMEOUT;
         loop {
             if UnixStream::connect(&sock).await.is_ok() {
                 break;
@@ -329,7 +478,8 @@ impl Registry {
             }
             if tokio::time::Instant::now() > deadline {
                 let _ = child.kill();
-                bail!("shim did not start within 5s");
+                let _ = child.wait();
+                bail!("shim did not start within {} s", SHIM_SLOW_TIMEOUT.as_secs());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -337,7 +487,7 @@ impl Registry {
         std::thread::spawn(move || {
             let _ = child.wait();
         });
-        self.adopt(&id).await
+        self.adopt(&id).await.map(|(info, _)| info)
     }
 
     pub async fn kill(&self, id: &str, signal: i32) -> Result<()> {
@@ -346,6 +496,7 @@ impl Registry {
 
     /// Returns once the session is gone, so a following `list` won't show it.
     pub async fn remove(&self, id: &str) -> Result<()> {
+        self.removed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.to_string(), std::time::Instant::now());
         self.simple(id, ShimRequest::Remove).await?;
         self.forget(id);
         Ok(())
@@ -392,7 +543,20 @@ impl Registry {
         mode: AttachMode,
         size: Option<Size>,
     ) -> Result<ShimAttachment> {
-        timed(SHIM_TIMEOUT, async {
+        self.attach_within(id, client, mode, size, SHIM_TIMEOUT).await
+    }
+
+    /// `attach`, allowing `limit` for the shim to answer (longer while a shim
+    /// updated in place is still reading its state).
+    pub async fn attach_within(
+        &self,
+        id: &str,
+        client: ClientDesc,
+        mode: AttachMode,
+        size: Option<Size>,
+        limit: Duration,
+    ) -> Result<ShimAttachment> {
+        timed(limit, async {
             let mut stream = self.connect(id).await?;
             write_frame(&mut stream, &ShimRequest::Attach { client, mode, size }).await?;
             match read_frame::<_, ShimMsg>(&mut stream).await? {

@@ -169,6 +169,9 @@ fn run(if_not_running: bool) -> Result<()> {
     init_logging();
     let runtime = paths::runtime_dir();
     paths::ensure_private_dir(&runtime)?;
+    // Session names, folders, commands and logs: for this user only.
+    paths::ensure_private_dir(&paths::state_dir())?;
+    paths::ensure_private_dir(&paths::log_dir())?;
     let _lock = match lock(&paths::daemon_lock(&runtime)) {
         Ok(l) => l,
         Err(_) if if_not_running => {
@@ -185,15 +188,16 @@ fn run(if_not_running: bool) -> Result<()> {
         let _ = std::fs::remove_file(&sock);
         let listener = bind(&sock)?;
         let bound = inode(&sock);
+        let lock_ino = inode(&paths::daemon_lock(&runtime));
 
         let registry = registry::Registry::new(runtime.clone(), shim);
-        registry.adopt_existing().await?;
-        tokio::spawn(registry.clone().watch_shims_dir());
-        // Adoption may not have found every session yet: a shim that was slow
-        // to answer, or one whose socket is still on its way back after a
-        // logout. Those are running, so they are neither restored nor have
-        // their spilled output removed.
+        // Sessions whose shell still runs in this boot: their shim may be
+        // stopped or slow, or its socket still on its way back after a
+        // logout. They are neither restored, nor is their socket or spilled
+        // output removed.
         let mut running = restore::still_running();
+        registry.adopt_existing(&running).await?;
+        tokio::spawn(registry.clone().watch_shims_dir());
         running.extend(registry.socket_ids());
         restore::start(&registry, &running).await;
         let upgrading = registry.clone();
@@ -208,16 +212,19 @@ fn run(if_not_running: bool) -> Result<()> {
             upgrading.adopt_new().await;
             upgrading.upgrade_shims(false).await;
             upgrading.apply_spill().await;
-            let mut keep: Vec<String> = upgrading.list().into_iter().map(|s| s.id).collect();
-            keep.extend(upgrading.socket_ids());
-            keep.extend(running);
-            spill::remove_orphans(&keep);
+            // From here on, the rescan updates shims it adopts late itself.
+            upgrading.startup_done();
+            spill::remove_orphans(|id| {
+                running.iter().any(|r| r == id)
+                    || upgrading.socket_ids().iter().any(|s| s == id)
+                    || upgrading.list().iter().any(|s| s.id == id)
+            });
         });
         tokio::spawn(memory::run(registry.clone()));
         let shutdown = Arc::new(Notify::new());
         let server = Arc::new(server::Server { registry, shutdown: shutdown.clone() });
         tracing::info!(socket = %sock.display(), "swarmd {} listening", swarm_proto::VERSION);
-        let keeper = tokio::spawn(keep_socket(server.clone(), runtime.clone(), bound));
+        let keeper = tokio::spawn(keep_socket(server.clone(), runtime.clone(), bound, lock_ino));
 
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let replaced = tokio::select! {
@@ -277,7 +284,7 @@ static BOUND_INODE: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
 /// own sockets back.
 ///
 /// Returns `true` when this daemon should exit because it was replaced.
-async fn keep_socket(server: Arc<server::Server>, runtime: PathBuf, mut bound: Option<u64>) -> bool {
+async fn keep_socket(server: Arc<server::Server>, runtime: PathBuf, mut bound: Option<u64>, mut lock_ino: Option<u64>) -> bool {
     let sock = paths::daemon_socket(&runtime);
     // The lock taken again after the old file was deleted, and the listener
     // serving the socket bound again (the first one is served by `run`).
@@ -304,9 +311,13 @@ async fn keep_socket(server: Arc<server::Server>, runtime: PathBuf, mut bound: O
             }
             continue;
         }
+        // Only the socket may have gone (deleted by hand, or a /tmp cleaner):
+        // the lock file this daemon holds is still there, and taking it a
+        // second time would fail against itself.
+        let lock_path = paths::daemon_lock(&runtime);
         let relisten = (|| {
             paths::ensure_private_dir(&paths::shims_dir(&runtime))?;
-            let lock_file = lock(&paths::daemon_lock(&runtime))?;
+            let lock_file = if lock_ino.is_some() && inode(&lock_path) == lock_ino { None } else { Some(lock(&lock_path)?) };
             if inode(&sock).is_some() {
                 bail!("another swarmd took its place");
             }
@@ -315,7 +326,10 @@ async fn keep_socket(server: Arc<server::Server>, runtime: PathBuf, mut bound: O
         })();
         match relisten {
             Ok((lock_file, listener)) => {
-                relock = Some(lock_file);
+                if let Some(f) = lock_file {
+                    relock = Some(f);
+                    lock_ino = inode(&lock_path);
+                }
                 bound = inode(&sock);
                 *BOUND_INODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = bound;
                 if let Some(old) = serving.replace(tokio::spawn(server.clone().serve(listener))) {
@@ -333,6 +347,20 @@ async fn keep_socket(server: Arc<server::Server>, runtime: PathBuf, mut bound: O
     }
 }
 
+/// Connects to the daemon socket in `runtime`, but only if the folder is this
+/// user's alone and the process listening runs as this user: in a shared
+/// place like `/tmp/swarm-<uid>`, another user could have made the folder
+/// first and be listening there to read what is typed.
+async fn connect_trusted(runtime: &Path) -> Result<UnixStream> {
+    paths::check_private_dir(runtime)?;
+    let s = UnixStream::connect(paths::daemon_socket(runtime)).await?;
+    let peer = s.peer_cred()?;
+    if peer.uid() != paths::uid() {
+        bail!("the daemon socket belongs to uid {}, not this user", peer.uid());
+    }
+    Ok(s)
+}
+
 /// Holds an exclusive `flock` for the life of the process.
 fn lock(path: &Path) -> Result<std::fs::File> {
     let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(path)?;
@@ -344,15 +372,19 @@ fn lock(path: &Path) -> Result<std::fs::File> {
 }
 
 async fn connect() -> Result<UnixStream> {
-    let sock = paths::daemon_socket(&paths::runtime_dir());
-    let mut s = UnixStream::connect(&sock).await?;
+    let runtime = paths::runtime_dir();
+    let mut s = connect_trusted(&runtime).await?;
     let hello = ClientMsg::Hello {
         proto: PROTOCOL_VERSION,
         client_name: "swarmd".into(),
         client_id: format!("swarmd-{}", std::process::id()),
     };
     write_frame(&mut s, &hello).await?;
-    match read_frame::<_, ServerMsg>(&mut s).await? {
+    // A stopped daemon accepts but never answers.
+    let welcome = tokio::time::timeout(Duration::from_secs(5), read_frame::<_, ServerMsg>(&mut s))
+        .await
+        .context("the daemon didn't answer")??;
+    match welcome {
         Some(ServerMsg::Welcome { proto, .. }) if proto == PROTOCOL_VERSION => Ok(s),
         Some(ServerMsg::Welcome { proto, daemon_version, .. }) => {
             bail!("running daemon {daemon_version} speaks protocol {proto}, expected {PROTOCOL_VERSION}")
@@ -367,8 +399,8 @@ async fn start() -> Result<bool> {
         return Ok(false);
     }
     let log_dir = paths::log_dir();
-    std::fs::create_dir_all(&log_dir)?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(log_dir.join("swarmd.log"))?;
+    paths::ensure_private_dir(&log_dir)?;
+    let log = paths::open_private_append(&log_dir.join("swarmd.log"))?;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
     cmd.arg("run").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(log));
     unsafe {
@@ -428,8 +460,7 @@ async fn status() -> Result<()> {
 
 async fn bridge() -> Result<()> {
     start().await?;
-    let sock = paths::daemon_socket(&paths::runtime_dir());
-    let stream = UnixStream::connect(&sock).await?;
+    let stream = connect_trusted(&paths::runtime_dir()).await?;
     let (mut rd, mut wr) = stream.into_split();
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();

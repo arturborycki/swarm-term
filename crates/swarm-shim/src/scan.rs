@@ -26,17 +26,36 @@ pub struct WarpHook {
     pub end: u64,
 }
 
+/// Longest OSC sequence the parser keeps (titles, folder URLs). Longer ones
+/// are cut off by the parser.
+const OSC_BUF: usize = 4096;
+/// Longest title or folder kept: session info is sent whole in one frame,
+/// so output must not be able to make it big.
+pub const MAX_TEXT: usize = 2048;
+
+/// `text` cut to at most `MAX_TEXT` bytes, at a character boundary.
+fn capped(mut text: String) -> String {
+    if text.len() > MAX_TEXT {
+        let mut end = MAX_TEXT;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
 /// Enough of the hex payload to read `{"hook": "<name>"`.
 const HOOK_NAME_HEX_PREFIX: usize = 160;
 
 pub struct Scanner {
-    parser: Parser,
+    parser: Parser<OSC_BUF>,
     perf: Collector,
 }
 
 impl Default for Scanner {
     fn default() -> Self {
-        Scanner { parser: Parser::new(), perf: Collector::default() }
+        Scanner { parser: Parser::new_with_size(), perf: Collector::default() }
     }
 }
 
@@ -90,11 +109,11 @@ impl Perform for Collector {
             // vte splits on ';', which titles and URLs may contain: rejoin.
             b"0" | b"2" if params.len() > 1 => {
                 let joined = params[1..].join(&b';');
-                self.events.title = Some(String::from_utf8_lossy(&joined).into_owned());
+                self.events.title = Some(capped(String::from_utf8_lossy(&joined).into_owned()));
             }
             b"7" if params.len() > 1 => {
                 let url = String::from_utf8_lossy(&params[1..].join(&b';')).into_owned();
-                if let Some(cwd) = cwd_from_file_url(&url) {
+                if let Some(cwd) = cwd_from_file_url(&url).filter(|c| c.len() <= MAX_TEXT) {
                     self.events.cwd = Some(cwd);
                 }
             }
@@ -190,6 +209,20 @@ mod tests {
         let ev = s.feed(0, b"\x1b]2;vim; main.rs\x07\x1b]7;file://mac.local/Users/me/my%20dir\x1b\\");
         assert_eq!(ev.title.as_deref(), Some("vim; main.rs"));
         assert_eq!(ev.cwd.as_deref(), Some("/Users/me/my dir"));
+    }
+
+    #[test]
+    fn huge_titles_are_cut_and_buffered_only_up_to_a_limit() {
+        let mut s = Scanner::default();
+        let mut out = b"\x1b]2;".to_vec();
+        out.extend(std::iter::repeat_n(b'x', 20_000_000));
+        out.push(0x07);
+        let ev = s.feed(0, &out);
+        let title = ev.title.unwrap_or_default();
+        assert!(title.len() <= MAX_TEXT, "{}", title.len());
+        // And it keeps working afterwards.
+        let ev = s.feed(out.len() as u64, b"\x1b]2;next\x07");
+        assert_eq!(ev.title.as_deref(), Some("next"));
     }
 
     #[test]

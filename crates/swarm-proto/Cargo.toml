@@ -10,3 +10,6 @@ libc.workspace = true
 postcard.workspace = true
 serde.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

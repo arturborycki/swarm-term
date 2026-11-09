@@ -24,6 +24,9 @@ use swarm_proto::{paths, SpillConfig};
 
 /// Bytes of output per chunk file.
 pub const CHUNK: usize = 1024 * 1024;
+/// Most full chunks held in memory while the disk is slower than the output;
+/// past this the oldest waiting chunk is dropped from the spill.
+const MAX_QUEUED: usize = 64;
 
 pub struct Spill {
     dir: PathBuf,
@@ -137,6 +140,10 @@ impl Spill {
             let full_start = st.open_start;
             st.open_start += CHUNK as u64;
             st.queued.push_back((full_start, full));
+        }
+        while st.queued.len() > MAX_QUEUED {
+            st.queued.pop_front();
+            tracing::warn!("the disk can't keep up with the output; dropped a chunk from the spill");
         }
         self.cv.notify_all();
     }

@@ -41,6 +41,12 @@ pub struct Session {
     pub(crate) reader_ctl: ReaderCtl,
     /// How many times this session's shim program was replaced in place.
     pub(crate) generation: u32,
+    /// Held while the child is reaped, and through an in-place update: the
+    /// child is either reaped before the switch (which is then called off) or
+    /// left for the next program, whose `waitpid` gets its real exit status.
+    pub(crate) reap_lock: Mutex<()>,
+    /// The child has been reaped: its pid may belong to another process now.
+    pub(crate) reaped: std::sync::atomic::AtomicBool,
 }
 
 /// Lets an in-place update stop the output reader at a safe point: between
@@ -251,9 +257,11 @@ impl Session {
         drop(pair.master);
 
         let now = now_ms();
+        let mut ui = std::collections::BTreeMap::new();
+        apply_ui(&mut ui, opts.ui.clone());
         let info = SessionInfo {
             id: id.to_string(),
-            name: opts.name.clone(),
+            name: opts.name.clone().map(|n| cap_text(n, MAX_NAME)),
             title: String::new(),
             cwd: Some(cwd),
             command,
@@ -265,7 +273,7 @@ impl Session {
             last_input_ms: now,
             size,
             clients: Vec::new(),
-            ui: opts.ui.clone(),
+            ui,
             buffer_start: 0,
             buffer_end: 0,
             alt_screen: false,
@@ -304,6 +312,8 @@ impl Session {
             reader_done: (Mutex::new(false), Condvar::new()),
             reader_ctl: ReaderCtl::default(),
             generation,
+            reap_lock: Mutex::new(()),
+            reaped: std::sync::atomic::AtomicBool::new(false),
         });
 
         std::thread::Builder::new().name("pty-writer".into()).spawn(move || {
@@ -351,7 +361,12 @@ impl Session {
 
         let s = session.clone();
         std::thread::Builder::new().name("child-wait".into()).spawn(move || {
+            // Wait for the exit without reaping, then reap under the lock.
+            wait_exited(s.pid);
+            let reap = s.reap_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let (code, signal) = wait_for(s.pid);
+            s.reaped.store(true, Ordering::Release);
+            drop(reap);
             s.on_exit(code, signal);
         })?;
 
@@ -565,18 +580,21 @@ impl Session {
             }
         }
         inner.info.last_input_ms = now_ms();
-        drop(inner);
         // A program that doesn't read its input (stopped, or busy) leaves it
-        // queued here; past the cap, more is dropped rather than held.
+        // queued here; past the cap, more is dropped rather than held. Counted
+        // while `inner` is held, so an in-place update (which takes `inner`,
+        // then waits for the count to reach zero) never misses it.
         let len = data.len();
         if self.pending_input.fetch_add(len, Ordering::AcqRel) + len > MAX_PENDING_INPUT {
             self.pending_input.fetch_sub(len, Ordering::AcqRel);
+            drop(inner);
             tracing::warn!("dropped {len} bytes of input: the program hasn't read the last {} MiB", MAX_PENDING_INPUT >> 20);
             return;
         }
         if self.input_tx.send(data).is_err() {
             self.pending_input.fetch_sub(len, Ordering::AcqRel);
         }
+        drop(inner);
     }
 
     pub fn client_resize(&self, client_id: u64, size: Size) {
@@ -635,7 +653,8 @@ impl Session {
     }
 
     pub fn kill(&self, signal: i32) -> Result<()> {
-        if !self.is_running() {
+        // Once reaped, the pid may already be someone else's.
+        if !self.is_running() || self.reaped.load(Ordering::Acquire) {
             return Ok(());
         }
         let rc = unsafe { libc::kill(self.pid as libc::pid_t, signal) };
@@ -652,15 +671,9 @@ impl Session {
     pub fn set_meta(&self, update: MetaUpdate) {
         let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(name) = update.name {
-            inner.info.name = name.filter(|n| !n.is_empty());
+            inner.info.name = name.filter(|n| !n.is_empty()).map(|n| cap_text(n, MAX_NAME));
         }
-        for (k, v) in update.ui {
-            if v.is_empty() {
-                inner.info.ui.remove(&k);
-            } else {
-                inner.info.ui.insert(k, v);
-            }
-        }
+        apply_ui(&mut inner.info.ui, update.ui);
         if smallest_policy(&inner) {
             self.apply_smallest(&mut inner);
         }
@@ -746,6 +759,37 @@ impl Session {
     }
 }
 
+/// Session info goes out whole in one frame (and in every list of
+/// sessions), so what clients store in it is kept small.
+const MAX_NAME: usize = 256;
+const MAX_UI_KEY: usize = 128;
+const MAX_UI_VALUE: usize = 4096;
+const MAX_UI_KEYS: usize = 128;
+
+/// `text` cut to at most `max` bytes, at a character boundary.
+fn cap_text(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let mut end = max;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
+/// Applies UI metadata changes: an empty value removes the key; oversized
+/// keys and keys past the limit are ignored, long values cut.
+fn apply_ui(ui: &mut std::collections::BTreeMap<String, String>, update: std::collections::BTreeMap<String, String>) {
+    for (k, v) in update {
+        if v.is_empty() {
+            ui.remove(&k);
+        } else if k.len() <= MAX_UI_KEY && (ui.contains_key(&k) || ui.len() < MAX_UI_KEYS) {
+            ui.insert(k, cap_text(v, MAX_UI_VALUE));
+        }
+    }
+}
+
 /// A close-on-exec duplicate of `fd`.
 pub(crate) fn dup_fd(fd: RawFd) -> Result<OwnedFd> {
     let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
@@ -771,6 +815,18 @@ fn wait_readable(fd: RawFd, timeout: Duration) -> std::io::Result<bool> {
             return Err(std::io::Error::last_os_error());
         }
         Ok(rc > 0)
+    }
+}
+
+/// Waits until child `pid` has exited, leaving it unreaped (a zombie), so its
+/// pid can't be reused yet and its status is still there for `wait_for`.
+fn wait_exited(pid: u32) {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
     }
 }
 

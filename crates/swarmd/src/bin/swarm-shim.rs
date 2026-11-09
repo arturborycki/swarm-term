@@ -2,6 +2,11 @@
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Asked by `swarmd`: which build is this program?
+    if args.first().map(String::as_str) == Some("--build-id") {
+        println!("{}", swarm_proto::BUILD_ID);
+        return;
+    }
     // Asked by a running shim before an in-place update: can this program
     // take over a session from it?
     if args.first().map(String::as_str) == Some("--accepts-handoff") {
