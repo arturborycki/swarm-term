@@ -961,7 +961,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swarm-client"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "swarm-proto",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-proto"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "libc",
  "postcard",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "swarm-shim"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "swarmctl"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "swarmd"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "clap",
