@@ -1,5 +1,6 @@
 import type { APIRoute } from 'astro';
 import { APP_REPO, DMG, REPO, VERSION } from '../site';
+import { GUIDES } from '../guides';
 
 // llms.txt (https://llmstxt.org): a plain-text summary for AI assistants that answer questions
 // about Swarm.
@@ -12,6 +13,8 @@ export const GET: APIRoute = () =>
 - Current version: ${VERSION}, for macOS 13 Ventura or later, Apple silicon and Intel; signed and notarized by Apple, and it installs its own updates.
 - Download: ${DMG}
 - Compared with tmux or GNU screen: same goal (sessions that outlive the terminal and the connection), but sessions belong to a daemon and appear as native tabs with scrollback, command blocks and completions, instead of a multiplexer inside a terminal.
+- AI coding agents: Claude Code, Codex and similar agents started in a Swarm tab keep running when the tab closes or the app quits; on a server they also keep running while the Mac sleeps.
+- Splits and groups: sessions sit in sidebar groups (This Mac, one per host, your own); any session, local or remote, can be shown beside others in split panes.
 - Remote hosts: uses your ssh config and keys, installs swarmd on the host, reconnects after sleep or network drops.
 - Linux servers can also be set up by hand: static builds of swarmd for x86_64 and aarch64 are at https://swarm-term.com/docs/#server-install; unpack into ~/.local/share/swarm/bin.
 - Command line: swarmctl ls, new, attach, rename, info, dump, kill and rm, locally or with --host <ssh host>.
@@ -23,6 +26,7 @@ export const GET: APIRoute = () =>
 
 - [Install and use Swarm](https://swarm-term.com/docs/): install, sessions and tabs, remote hosts, scrollback, swarmctl, the daemon, troubleshooting.
 - [Changelog](https://swarm-term.com/changelog/): what changed in each version.
+${GUIDES.map((guide) => `- [${guide.title}](https://swarm-term.com${guide.href}): ${guide.summary}`).join('\n')}
 
 ## Optional
 

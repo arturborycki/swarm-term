@@ -1,7 +1,8 @@
 import type { APIRoute } from 'astro';
+import { GUIDES } from '../guides';
 
 // Pages for search engines; confirmation and error pages are noindex and left out.
-const PAGES = ['/', '/docs/', '/changelog/', '/news/', '/report/', '/privacy/'];
+const PAGES = ['/', '/docs/', ...GUIDES.map((guide) => guide.href), '/changelog/', '/news/', '/report/', '/privacy/'];
 
 export const GET: APIRoute = ({ site }) => {
   const lastmod = new Date().toISOString().slice(0, 10);

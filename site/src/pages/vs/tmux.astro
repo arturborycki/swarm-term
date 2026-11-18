@@ -1,0 +1,113 @@
+---
+import Guide from '../../layouts/Guide.astro';
+
+const rows = [
+  ['Sessions survive closing the terminal', 'Yes', 'Yes'],
+  ['Sessions survive a dropped SSH connection', 'Yes, and the tab reconnects by itself', 'Yes, after you ssh in and reattach'],
+  ['Where you see sessions', 'Native tabs and a sidebar in a macOS app', 'Windows and panes inside any terminal'],
+  ['Scrollback', 'The terminal’s own: scroll, select and search with the mouse; 16 MB per session, more on disk', 'tmux’s copy mode; the outer terminal can’t scroll it'],
+  ['Keys', 'macOS shortcuts, no prefix key', 'A prefix key (Ctrl-b) before each command'],
+  ['Remote setup', 'Installs and updates its daemon on the host for you', 'Install tmux on each host yourself'],
+  ['Updates', 'Running sessions move to the new version without restarting', 'Running sessions keep the old server until it exits'],
+  ['Command line', 'swarmctl: ls, new, attach, dump and more, locally or with --host', 'tmux’s own commands, very scriptable'],
+  ['Platforms', 'App on macOS 13+; hosts on Linux or macOS', 'Almost any Unix, in any terminal'],
+  ['Price and license', 'Free; app AGPL-3.0, daemon MIT or Apache-2.0', 'Free; ISC license'],
+];
+
+const faq = [
+  {
+    q: 'Is Swarm a replacement for tmux?',
+    a: 'For keeping work running when you close the terminal or lose the connection, yes: each Swarm tab is a session owned by a background daemon, on your Mac or on a server. tmux is still the better fit if you need sessions on a machine you only reach from Linux or Windows, or want one tool in every terminal.',
+  },
+  {
+    q: 'Can I use tmux inside Swarm?',
+    a: 'Yes. A Swarm session runs your normal shell, so tmux, screen and full-screen programs work in it as in any terminal.',
+  },
+  {
+    q: 'Do I need to install anything on my servers?',
+    a: 'No. When you connect to a host, Swarm offers to install its daemon, swarmd, in your home folder; it needs no root. Static Linux builds are also available to set servers up yourself.',
+  },
+];
+
+const faqPage = {
+  '@type': 'FAQPage',
+  mainEntity: faq.map(({ q, a }) => ({ '@type': 'Question', name: q, acceptedAnswer: { '@type': 'Answer', text: a } })),
+};
+---
+
+<Guide
+  kind="# compare"
+  title="Swarm vs tmux: persistent terminal sessions on macOS"
+  description="Swarm and tmux both keep terminal sessions running when you close the window or lose SSH. How they differ: native tabs and scrollback, remote setup, keys, updates and platforms."
+  jsonLd={[faqPage]}
+>
+  <h1>Swarm vs tmux</h1>
+  <p class="lede">
+    Both keep your shells running when you close the window or the SSH connection drops. tmux does it with a
+    multiplexer inside your terminal. Swarm does it with a daemon that owns each session, and shows the sessions as
+    native macOS tabs.
+  </p>
+
+  <h2>The short version</h2>
+  <ul>
+    <li><strong>Pick tmux</strong> if you work across Linux, macOS and Windows terminals, already live in its key bindings, or need a session that several people attach to on a shared server.</li>
+    <li><strong>Pick Swarm</strong> if you're on a Mac and want persistent local and SSH sessions without a prefix key, with the terminal's own scrollback, mouse selection and search, and with remote hosts set up for you.</li>
+    <li><strong>Or use both:</strong> tmux runs fine inside a Swarm session.</li>
+  </ul>
+
+  <h2>Side by side</h2>
+  <div class="table">
+    <table>
+      <thead>
+        <tr><th></th><th>Swarm</th><th>tmux</th></tr>
+      </thead>
+      <tbody>
+        {rows.map(([what, swarm, tmux]) => (
+          <tr><td><strong>{what}</strong></td><td>{swarm}</td><td>{tmux}</td></tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+
+  <h2>How they keep sessions alive</h2>
+  <p>
+    tmux runs a server process that owns your shells, and your terminal shows a tmux client drawing them. Close the
+    terminal and the server keeps going; open a terminal and run <code>tmux attach</code> to see it again. On a remote
+    machine you ssh in first, then attach.
+  </p>
+  <p>
+    Swarm splits the same job differently. A small daemon, <code>swarmd</code>, owns every session, on your Mac or on a
+    server over SSH. The Swarm app is only a view: quitting it, updating it or closing a tab leaves the sessions
+    running, and reopening shows each one with its earlier output. For remote hosts the app connects with your own ssh
+    config and keys, and reconnects by itself after sleep or a network change.
+  </p>
+
+  <h2>Day to day</h2>
+  <h3>Scrollback and search</h3>
+  <p>
+    Inside tmux your terminal sees only the visible screen, so scrolling and searching history means tmux's copy mode.
+    In Swarm each tab is a normal terminal view: scroll with the trackpad, select with the mouse, and search the
+    output. Commands show as blocks with their exit codes and durations, thanks to the Warp engine Swarm is built on.
+  </p>
+  <h3>Splits and layout</h3>
+  <p>
+    tmux has windows and panes driven by keys. Swarm has tabs, sidebar groups and split panes: right-click a session for
+    <strong>Open in Split</strong>, or drag it onto a pane, to see local and remote sessions side by side.
+  </p>
+  <h3>Scripting</h3>
+  <p>
+    tmux is very scriptable. Swarm's <code>swarmctl</code> covers the common jobs: list, create, attach to, rename, dump
+    and end sessions, on this Mac or on any host with <code>--host</code>.
+  </p>
+  <pre class="term"><span class="p">$</span> swarmctl ls --host build-box
+<span class="p">$</span> swarmctl attach release --host build-box   <span class="d"># ctrl-\ detaches</span>
+<span class="p">$</span> swarmctl dump release &gt; build.log</pre>
+
+  <h2>Questions</h2>
+  {faq.map(({ q, a }) => (
+    <>
+      <h3>{q}</h3>
+      <p>{a}</p>
+    </>
+  ))}
+</Guide>

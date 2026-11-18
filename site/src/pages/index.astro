@@ -2,6 +2,19 @@
 import { Image } from 'astro:assets';
 import Base from '../layouts/Base.astro';
 import hero from '../assets/hero.png';
+import type { ImageMetadata } from 'astro';
+// Extra screenshots: each image in src/assets/shots/ is shown under the hero,
+// in file-name order, with its alt text from shots/captions.json.
+import captions from '../assets/shots/captions.json';
+const shots = Object.entries(
+  import.meta.glob<{ default: ImageMetadata }>('../assets/shots/*.{png,jpg,webp}', { eager: true }),
+)
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([path, mod]) => {
+    const file = path.split('/').pop() ?? '';
+    const caption = (captions as Record<string, { label: string; alt: string }>)[file];
+    return { src: mod.default, label: caption?.label ?? file, alt: caption?.alt ?? '' };
+  });
 import StarLink from '../components/StarLink.astro';
 import { APP_REPO, DMG, REPO, REPO_PUBLIC, VERSION, linuxTarball } from '../site';
 
@@ -19,7 +32,7 @@ const features = [
   {
     icon: 'blocks',
     title: 'A modern terminal on top',
-    body: 'Built on Warp’s open-source engine: commands as blocks, a real text editor for input, completions. One panel per session, splits for more.',
+    body: 'Built on Warp’s open-source engine: commands as blocks, a real text editor for input, completions. Splits show local and remote sessions side by side.',
   },
   {
     icon: 'update',
@@ -50,6 +63,14 @@ const faq = [
   {
     q: 'Does Swarm keep SSH sessions alive on remote servers?',
     a: 'Yes. Swarm connects to Linux and macOS hosts through your own ssh configuration and keys, installs its daemon there, and runs your sessions on the server. If your Mac sleeps or the network drops, the sessions keep running and Swarm reconnects to them.',
+  },
+  {
+    q: 'Can I keep Claude Code or Codex running after closing the terminal?',
+    a: 'Yes. An agent started in a Swarm tab belongs to the session, not the window, so it keeps working when you close the tab or quit Swarm, and its output is there when you reopen it. Run it in a session on a server to keep it going while your Mac sleeps. See the guide at swarm-term.com/guides/keep-claude-code-running/.',
+  },
+  {
+    q: 'Can I see several sessions at once?',
+    a: 'Yes. Right-click a session in the sidebar and choose Open in Split, or drag it onto the open session, to show it beside the others: local and remote sessions can share one window. The sidebar keeps sessions in groups, This Mac and one per host, plus groups of your own.',
   },
   {
     q: 'Can I use it from the command line or in scripts?',
@@ -91,8 +112,8 @@ const faqPage = {
 ---
 
 <Base
-  title="Swarm — macOS terminal with persistent sessions, local and over SSH"
-  description="Swarm is a free macOS terminal with persistent sessions. Quit the app or lose Wi-Fi and your shells, builds and SSH sessions keep running, like tmux, in native tabs."
+  title="Swarm terminal — persistent sessions for macOS, SSH and AI agents"
+  description="Swarm is a free macOS terminal with persistent sessions. Quit the app or lose Wi-Fi and your shells, builds, SSH sessions and AI coding agents like Claude Code keep running, like tmux, in native tabs."
   jsonLd={[software, faqPage]}
 >
   <section class="hero frame">
@@ -100,8 +121,8 @@ const faqPage = {
     <h1>Close the window.<br />The work keeps <span class="accent">running<span class="cursor" aria-hidden="true"></span></span></h1>
     <p class="lede">
       Swarm is a macOS terminal with persistent sessions: every tab is owned by a small background daemon, on your Mac
-      or on a server over SSH. Quit the app, lose Wi-Fi, update it: your shells, builds and servers are still there
-      when you come back.
+      or on a server over SSH. Quit the app, lose Wi-Fi, update it: your shells, builds, servers and coding agents
+      like Claude Code are still there when you come back.
     </p>
     <div class="actions">
       <a class="btn primary" href={DMG}>
@@ -123,6 +144,12 @@ const faqPage = {
       <div class="fig-bar"><span>[ fig. 1 · four sessions, one window ]</span><span>swarm {VERSION}</span></div>
       <Image src={hero} alt="The Swarm app: a sidebar of four sessions (swarm-term, release, web, notes) beside a terminal showing git log, a passing cargo test and swarmctl ls." widths={[800, 1280, 1920, 2560]} sizes="(max-width: 1200px) 100vw, 1120px" loading="eager" />
     </figure>
+    {shots.map((shot, n) => (
+      <figure class="fig">
+        <div class="fig-bar"><span>[ fig. {n + 2} · {shot.label} ]</span><span>swarm {VERSION}</span></div>
+        <Image src={shot.src} alt={shot.alt} widths={[800, 1280, 1920, 2560]} sizes="(max-width: 1200px) 100vw, 1120px" />
+      </figure>
+    ))}
   </section>
 
   <section class="section">
@@ -293,6 +320,8 @@ const faqPage = {
 
   .shot {
     padding-bottom: 96px;
+    display: grid;
+    gap: 40px;
   }
 
   .diagram {

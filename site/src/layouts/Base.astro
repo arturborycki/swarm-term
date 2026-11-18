@@ -9,6 +9,7 @@ import NewsSignup from '../components/NewsSignup.astro';
 import RepoLink from '../components/RepoLink.astro';
 import { APP_REPO, DMG, REPO_PUBLIC, VERSION } from '../site';
 import StarLink from '../components/StarLink.astro';
+import { GUIDES } from '../guides';
 
 interface Props {
   title: string;
@@ -100,6 +101,10 @@ const nav = [
           <a href="/docs/">docs</a>
           <a href="/changelog/">changelog</a>
           <a href="/news/">release news</a>
+        </div>
+        <div>
+          <p class="head">guides</p>
+          {GUIDES.map((guide) => <a href={guide.href}>{guide.short}</a>)}
         </div>
         <div>
           <p class="head">project</p>
@@ -240,7 +245,7 @@ const nav = [
 
   .cols {
     display: grid;
-    grid-template-columns: 2fr 1fr 1fr 1fr;
+    grid-template-columns: 2fr repeat(4, 1fr);
     gap: 32px;
   }
 

@@ -1,0 +1,66 @@
+---
+import Guide from '../../layouts/Guide.astro';
+
+const ways = [
+  ['nohup / disown', 'Keeps a command running after logout', 'No interactive session to come back to; output only in a file'],
+  ['tmux or screen on the server', 'Interactive sessions that survive disconnects', 'Install it per host, ssh in and reattach by hand, prefix keys, its own scrollback'],
+  ['mosh', 'A connection that survives roaming and sleep', 'No reattaching: once the client is closed, you can’t get back to that session'],
+  ['Swarm', 'Native tabs for sessions on the server that reconnect by themselves', 'The app is macOS only'],
+];
+---
+
+<Guide
+  kind="# guide"
+  title="Persistent SSH sessions on macOS that survive sleep and disconnects | Swarm"
+  description="How to keep SSH sessions and long-running jobs alive on a Mac through sleep, Wi-Fi changes and dropped connections: nohup, tmux, mosh, and Swarm's persistent remote sessions."
+>
+  <h1>Persistent SSH sessions on macOS</h1>
+  <p class="lede">
+    Close your MacBook during a long build on a server and the SSH connection drops; the shell on the server gets a
+    hang-up and the build dies with it. Here is how to keep remote sessions alive through sleep, network changes and
+    disconnects.
+  </p>
+
+  <h2>The options</h2>
+  <div class="table">
+    <table>
+      <thead>
+        <tr><th>Approach</th><th>What it gives you</th><th>The catch</th></tr>
+      </thead>
+      <tbody>
+        {ways.map(([how, good, catchText]) => (
+          <tr><td><strong>{how}</strong></td><td>{good}</td><td>{catchText}</td></tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+
+  <h2>With Swarm</h2>
+  <p>
+    Swarm is a macOS terminal whose tabs are persistent sessions. For a server, it runs a small daemon,
+    <code>swarmd</code>, on the host; the daemon owns your shells there, so they don't depend on the SSH connection.
+  </p>
+  <ol>
+    <li><strong>Connect.</strong> Click <strong>Connect…</strong> in the sidebar and pick a host from <code>~/.ssh/config</code>, or type <code>user@host[:port]</code>. Swarm uses your keys, agent and jump hosts, and never asks for a password itself.</li>
+    <li><strong>Let it install the daemon.</strong> If the host doesn't have <code>swarmd</code>, Swarm offers to install it in your home folder. No root is needed, and Linux and macOS hosts both work.</li>
+    <li><strong>Work as usual.</strong> Open tabs on the host, run builds, tail logs, start servers. Sessions for each host sit in their own group in the sidebar.</li>
+    <li><strong>Close the lid.</strong> When your Mac wakes or joins another network, the tabs show that they're reconnecting and pick up where they were, with the output that arrived meanwhile.</li>
+  </ol>
+  <p>
+    On Linux hosts, turn on lingering (Settings → Hosts, or <code>loginctl enable-linger</code>) so that systemd keeps
+    your sessions when your last login there ends.
+  </p>
+
+  <h2>From the command line</h2>
+  <p>The same remote sessions are available from any terminal with <code>swarmctl</code>:</p>
+  <pre class="term"><span class="p">$</span> swarmctl ls --host build-box
+<span class="p">$</span> swarmctl new -d -n nightly --host build-box   <span class="d"># start a detached session</span>
+<span class="p">$</span> swarmctl attach nightly --host build-box      <span class="d"># ctrl-\ detaches</span></pre>
+
+  <h2>Setting up servers in advance</h2>
+  <p>
+    To prepare hosts with a script or configuration management, unpack the static Linux build of <code>swarmd</code>
+    into <code>~/.local/share/swarm/bin</code>; the app finds it there and keeps it updated. See
+    <a href="/docs/#server-install">install on a server yourself</a>.
+  </p>
+</Guide>

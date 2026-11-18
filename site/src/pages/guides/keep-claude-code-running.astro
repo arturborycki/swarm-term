@@ -1,0 +1,92 @@
+---
+import Guide from '../../layouts/Guide.astro';
+
+const steps = [
+  {
+    name: 'Install Swarm',
+    text: 'Download Swarm for macOS 13 or later and move it to Applications.',
+  },
+  {
+    name: 'Start the agent in a Swarm tab',
+    text: 'Open a tab in your project folder and run claude (or codex). The tab is a session owned by the swarmd daemon, not by the window.',
+  },
+  {
+    name: 'Quit or close whenever you like',
+    text: 'Close the tab, quit Swarm or update it. The agent keeps working, and reopening the session shows everything it printed meanwhile.',
+  },
+  {
+    name: 'Run it on a server to keep going while your Mac sleeps',
+    text: 'Connect Swarm to a Linux or macOS host over SSH and start the agent there. It keeps running while your laptop sleeps or changes networks, and the tab reconnects by itself.',
+  },
+];
+
+const howTo = {
+  '@type': 'HowTo',
+  name: 'Keep Claude Code running after you close the terminal',
+  step: steps.map((s, i) => ({ '@type': 'HowToStep', position: i + 1, name: s.name, text: s.text })),
+};
+---
+
+<Guide
+  kind="# guide"
+  title="Keep Claude Code and Codex running after you close the terminal | Swarm"
+  description="Run Claude Code, Codex and other AI coding agents in terminal sessions that keep working when you close the window, quit the app or lose Wi-Fi, on your Mac or on a server over SSH."
+  jsonLd={[howTo]}
+>
+  <h1>Keep Claude Code running after you close the terminal</h1>
+  <p class="lede">
+    AI coding agents like Claude Code and Codex run for minutes or hours. In a normal terminal, closing the window or
+    quitting the app ends them mid-task. In Swarm every tab is a persistent session, so the agent keeps working and its
+    output is waiting when you come back.
+  </p>
+
+  <h2>Why agents stop</h2>
+  <p>
+    An agent is a process in your terminal's shell. When the terminal window closes, the shell gets a hang-up signal
+    and the agent goes with it. The usual workarounds are <code>tmux</code> or <code>nohup</code>: tmux works but puts a
+    multiplexer with its own keys and scrollback between you and the agent, and <code>nohup</code> loses the
+    interactive session entirely, so you can't answer the agent's questions.
+  </p>
+
+  <h2>How to do it with Swarm</h2>
+  <ol>
+    {steps.map((s) => (
+      <li><strong>{s.name}.</strong> {s.text}</li>
+    ))}
+  </ol>
+  <pre class="term"><span class="p">$</span> cd ~/code/my-app
+<span class="p">$</span> claude
+<span class="d"># quit Swarm, reopen it later: the session is still there, with its output</span></pre>
+
+  <h2>What keeps running, and when</h2>
+  <ul>
+    <li><strong>Closing a tab or the window:</strong> the session is detached, not ended. Reopen it from the sidebar's <strong>detached</strong> list.</li>
+    <li><strong>Quitting or updating Swarm:</strong> sessions keep running, and Swarm reopens your tabs when it starts.</li>
+    <li><strong>Your Mac sleeping:</strong> a Mac pauses its own processes while asleep, so a local agent continues when it wakes. To keep working through sleep, run the agent on a server.</li>
+    <li><strong>Lost Wi-Fi with a remote session:</strong> the agent keeps running on the server and the tab reconnects when the network is back.</li>
+  </ul>
+
+  <h2>Agents on a server</h2>
+  <p>
+    Click <strong>Connect…</strong> in Swarm's sidebar and pick a host from your <code>~/.ssh/config</code>. Swarm uses
+    your own keys, installs its daemon on the host (no root needed) and opens a session there. Start the agent in that
+    tab and close your laptop: it keeps working on the server.
+  </p>
+  <p>
+    On Linux, turn on lingering for the host (Settings → Hosts in Swarm, or <code>loginctl enable-linger</code>), so
+    systemd doesn't end your sessions when your last login there ends. See the
+    <a href="/docs/#remote">remote hosts docs</a>.
+  </p>
+
+  <h2>Watching several agents</h2>
+  <p>
+    Run one agent per session and keep them in sidebar groups, by host or by project. To watch a few at once, right-click
+    a session and choose <strong>Open in Split</strong>, or drag it onto the open session: local and remote agents can
+    sit side by side.
+  </p>
+  <p>
+    From any other terminal, <code>swarmctl ls</code> lists the sessions and <code>swarmctl attach &lt;name&gt;</code>{' '}
+    opens one (add <code>--host</code> for a server). <code>swarmctl dump &lt;name&gt;</code> prints everything the session
+    has kept, which is handy for saving an agent's full transcript.
+  </p>
+</Guide>

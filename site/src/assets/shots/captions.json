@@ -1,0 +1,10 @@
+{
+  "01-splits.png": {
+    "label": "a local and a remote session, side by side",
+    "alt": "The Swarm app with sessions grouped by host in the sidebar (This Mac and a server) and the window split between a local session and a remote one."
+  },
+  "02-agents.png": {
+    "label": "coding agents that outlive the window",
+    "alt": "The Swarm app showing Claude Code working in a session that kept running while the app was closed."
+  }
+}
