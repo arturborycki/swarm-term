@@ -6,7 +6,7 @@ over SSH. Close the window, quit the app, lose Wi-Fi or update Swarm: your
 shells, builds and servers keep running, and the tabs reattach with their
 output.
 
-![Swarm: a sidebar of sessions beside a terminal showing git log, a passing cargo test and swarmctl ls](site/src/assets/hero.png)
+![Swarm: a local zsh session beside a session on a Linux server running btm, in one split window](site/src/assets/shots/01-splits.png)
 
 **Download:** [swarm-term.com](https://swarm-term.com) or
 [Releases](https://github.com/arturborycki/swarm-term/releases). macOS 13

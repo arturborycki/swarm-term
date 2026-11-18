@@ -1,10 +1,10 @@
 {
   "01-splits.png": {
     "label": "a local and a remote session, side by side",
-    "alt": "The Swarm app with sessions grouped by host in the sidebar (This Mac and a server) and the window split between a local session and a remote one."
+    "alt": "The Swarm window split in two: a local zsh session on the left and, on the right, a session on a Linux server running the btm system monitor."
   },
   "02-agents.png": {
-    "label": "coding agents that outlive the window",
-    "alt": "The Swarm app showing Claude Code working in a session that kept running while the app was closed."
+    "label": "two claude code agents, one window",
+    "alt": "The Swarm window split between two Claude Code sessions in the same project, each in its own persistent session."
   }
 }
