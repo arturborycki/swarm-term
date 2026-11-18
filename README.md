@@ -6,6 +6,8 @@ over SSH. Close the window, quit the app, lose Wi-Fi or update Swarm: your
 shells, builds and servers keep running, and the tabs reattach with their
 output.
 
+![Swarm: a local zsh session beside a session on a Linux server running btm, in one split window](site/src/assets/shots/01-splits.png)
+
 **Download:** [swarm-term.com](https://swarm-term.com) or
 [Releases](https://github.com/arturborycki/swarm-term/releases). macOS 13
 Ventura or later, universal (Apple silicon and Intel), signed and notarized
@@ -13,9 +15,15 @@ by Apple. Swarm installs its own updates.
 
 - **Persistent tabs:** sessions belong to `swarmd`, not to the app, so they
   survive the app quitting, crashing or updating.
+- **AI coding agents keep working:** Claude Code, Codex and other agents
+  started in a tab keep running when you close it or quit the app; on a
+  server they also keep going while your Mac sleeps.
 - **Local or remote:** sessions run on this Mac or on Linux and macOS hosts
   through your own ssh setup. The app installs `swarmd` on a host itself and
   reconnects after sleep or network drops.
+- **Splits and groups:** sessions sit in sidebar groups (This Mac, one per
+  host, your own); drag any session onto a pane to show local and remote
+  sessions side by side.
 - **A modern terminal on top:** the app is built on Warp's open-source engine
   (blocks, the input editor, completions), with its own design and no Warp
   account.

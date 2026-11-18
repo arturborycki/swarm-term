@@ -1,0 +1,172 @@
+---
+// A single long-form page (a guide or a comparison): the site's chrome, an
+// article column, and links to the other guides.
+import Base from './Base.astro';
+import { DMG, VERSION } from '../site';
+import { GUIDES } from '../guides';
+
+interface Props {
+  title: string;
+  description: string;
+  /** Short label above the heading, like "# guide". */
+  kind: string;
+  /** Extra schema.org objects for this page. */
+  jsonLd?: Record<string, unknown>[];
+}
+const { title, description, kind, jsonLd = [] } = Astro.props;
+const path = Astro.url.pathname;
+const others = GUIDES.filter((guide) => guide.href !== path);
+---
+
+<Base title={title} description={description} jsonLd={jsonLd}>
+  <div class="frame guide">
+    <article class="prose">
+      <p class="label">{kind} <span class="dim">[ swarm {VERSION} ]</span></p>
+      <slot />
+      <div class="get">
+        <a class="btn primary" href={DMG}>Download Swarm for macOS</a>
+        <a class="btn" href="/docs/">Read the docs</a>
+      </div>
+    </article>
+    <aside>
+      <p class="label"># more <span class="dim">[ {others.length} ]</span></p>
+      <nav aria-label="Guides">
+        {others.map((guide) => <a href={guide.href}>{guide.title}</a>)}
+        <a href="/docs/">Swarm docs</a>
+      </nav>
+    </aside>
+  </div>
+</Base>
+
+<style>
+  .guide {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 240px;
+    gap: 56px;
+    padding-top: 64px;
+    padding-bottom: 96px;
+  }
+
+  aside {
+    position: sticky;
+    top: 92px;
+    align-self: start;
+    display: grid;
+    gap: 16px;
+  }
+
+  aside nav {
+    display: grid;
+    gap: 10px;
+    font-size: 14px;
+  }
+
+  aside nav a {
+    color: var(--ink-2);
+    text-decoration: none;
+  }
+
+  aside nav a:hover {
+    color: var(--ink);
+  }
+
+  @media (max-width: 899px) {
+    .guide {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 40px;
+      padding-top: 40px;
+    }
+    aside {
+      position: static;
+      border-top: 1px solid var(--line);
+      padding-top: 24px;
+    }
+  }
+
+  .prose {
+    max-width: 720px;
+  }
+
+  .get {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 48px;
+    padding-top: 32px;
+    border-top: 1px solid var(--line);
+  }
+
+  .prose :global(h1) {
+    margin-bottom: 12px;
+  }
+
+  .prose :global(h2) {
+    font-size: 26px;
+    margin: 48px 0 16px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    scroll-margin-top: 80px;
+  }
+
+  .prose :global(h3) {
+    font-size: 18px;
+    margin: 28px 0 8px;
+  }
+
+  .prose :global(p),
+  .prose :global(li),
+  .prose :global(td) {
+    color: var(--ink-2);
+  }
+
+  .prose :global(strong),
+  .prose :global(th) {
+    color: var(--ink);
+    font-weight: 500;
+  }
+
+  .prose :global(code) {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--accent-soft);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  .prose :global(pre.term) {
+    margin: 16px 0;
+  }
+
+  .prose :global(pre code) {
+    background: none;
+    padding: 0;
+  }
+
+  .prose :global(a:not(.btn)) {
+    color: var(--accent);
+  }
+
+  .prose :global(.table) {
+    overflow-x: auto;
+    margin: 16px 0;
+  }
+
+  .prose :global(table) {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 15px;
+  }
+
+  .prose :global(th),
+  .prose :global(td) {
+    border-top: 1px solid var(--line);
+    padding: 10px 12px 10px 0;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  .prose :global(th) {
+    font-size: 13px;
+    font-family: var(--mono);
+  }
+</style>
