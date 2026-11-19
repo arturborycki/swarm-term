@@ -5,8 +5,7 @@ cask "swarm" do
   version "0.1.8"
   sha256 "b285d7ca00ec8ea798a3c3b0c12599b5e0780ef63a0d4c7f7afd8bd393124396"
 
-  url "https://github.com/arturborycki/swarm-term/releases/download/v#{version}/Swarm-#{version}.dmg",
-      verified: "github.com/arturborycki/swarm-term/"
+  url "https://github.com/arturborycki/swarm-term/releases/download/v#{version}/Swarm-#{version}.dmg"
   name "Swarm"
   desc "Terminal with persistent sessions, locally and over SSH"
   homepage "https://swarm-term.com/"

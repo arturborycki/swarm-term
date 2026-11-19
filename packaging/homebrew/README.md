@@ -5,6 +5,12 @@
 repositories, so that `brew install --cask swarm` and `brew install swarmd` work without a
 tap. They aren't submitted yet.
 
+Until then they're published in the tap
+[arturborycki/homebrew-swarm](https://github.com/arturborycki/homebrew-swarm):
+`scripts/update-homebrew.sh` copies them there (without the comment at the top) and pushes
+on each release. Install from it with `brew install --cask arturborycki/swarm/swarm` or
+`brew install arturborycki/swarm/swarmd`.
+
 ## What Homebrew requires
 
 From Homebrew's [acceptance policy](https://docs.brew.sh/Package-Acceptance-Policy):
