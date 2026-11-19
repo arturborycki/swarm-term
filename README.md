@@ -11,7 +11,11 @@ output.
 **Download:** [swarm-term.com](https://swarm-term.com) or
 [Releases](https://github.com/arturborycki/swarm-term/releases). macOS 13
 Ventura or later, universal (Apple silicon and Intel), signed and notarized
-by Apple. Swarm installs its own updates.
+by Apple. Swarm installs its own updates. Or with Homebrew:
+
+```bash
+brew install --cask arturborycki/swarm/swarm
+```
 
 - **Persistent tabs:** sessions belong to `swarmd`, not to the app, so they
   survive the app quitting, crashing or updating.
@@ -49,7 +53,7 @@ Docs: [swarm-term.com/docs](https://swarm-term.com/docs/). Design notes:
 | `app/` (not in this repository) | The app: a fork of Warp, [arturborycki/swarm-app](https://github.com/arturborycki/swarm-app), checked out here |
 | `scripts/` | App bundle, Linux builds, DMG, signing and icon scripts |
 | `site/` | swarm-term.com (Astro, deployed on Cloudflare) |
-| `packaging/homebrew/` | Homebrew cask |
+| `packaging/homebrew/` | Homebrew cask and formula, copied to the [tap](https://github.com/arturborycki/homebrew-swarm) on each release |
 
 ## Build the daemon and swarmctl
 

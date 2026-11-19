@@ -33,12 +33,14 @@ const toc = [
         <li>Open the DMG and drag <strong>Swarm.app</strong> to Applications.</li>
         <li>Open Swarm. It's notarized by Apple, so macOS opens it after the usual "downloaded from the internet" question.</li>
       </ol>
+      <p>Or install it with Homebrew, which also puts <code>swarmctl</code> on your <code>PATH</code>:</p>
+      <pre class="term">brew install --cask arturborycki/swarm/swarm</pre>
       <p>
         Swarm checks for new versions shortly after launch and daily (also <strong>Swarm → Check for Updates…</strong>)
         and offers <strong>Install and Restart</strong>. It installs only downloads signed with Swarm's release key, and
         your sessions keep running through the restart.
       </p>
-      <p>To use <code>swarmctl</code> from any terminal, link it onto your <code>PATH</code>:</p>
+      <p>If you installed from the DMG, link <code>swarmctl</code> onto your <code>PATH</code>:</p>
       <pre class="term">ln -s /Applications/Swarm.app/Contents/MacOS/swarmctl /usr/local/bin/swarmctl</pre>
 
       <h2 id="sessions">Sessions and tabs</h2>

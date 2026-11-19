@@ -12,6 +12,7 @@ export const GET: APIRoute = () =>
 
 - Current version: ${VERSION}, for macOS 13 Ventura or later, Apple silicon and Intel; signed and notarized by Apple, and it installs its own updates.
 - Download: ${DMG}
+- Homebrew: brew install --cask arturborycki/swarm/swarm
 - Compared with tmux or GNU screen: same goal (sessions that outlive the terminal and the connection), but sessions belong to a daemon and appear as native tabs with scrollback, command blocks and completions, instead of a multiplexer inside a terminal.
 - AI coding agents: Claude Code, Codex and similar agents started in a Swarm tab keep running when the tab closes or the app quits; on a server they also keep running while the Mac sleeps.
 - Splits and groups: sessions sit in sidebar groups (This Mac, one per host, your own); any session, local or remote, can be shown beside others in split panes.
