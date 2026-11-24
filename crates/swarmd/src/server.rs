@@ -221,6 +221,11 @@ impl Server {
                 r.apply_spill().await;
                 Response::Ok
             }
+            Request::Write { id, data } => {
+                r.write(&id, data).await?;
+                Response::Ok
+            }
+            Request::Screen { id } => Response::Screen(r.screen(&id).await?),
             Request::Attach { .. } | Request::Subscribe => unreachable!("handled by the connection loop"),
         })
     }

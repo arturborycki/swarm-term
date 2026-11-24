@@ -41,6 +41,25 @@ impl Screen {
         self.guard("read the screen", |p| p.screen().alternate_screen()).unwrap_or(false)
     }
 
+    /// The visible screen as text, for `swarmctl capture` (empty if the
+    /// model failed).
+    pub fn capture(&mut self) -> swarm_proto::ScreenCapture {
+        let (rows, cols) = (self.rows, self.cols);
+        self.guard("read the screen", |p| {
+            let s = p.screen();
+            swarm_proto::ScreenCapture {
+                size: swarm_proto::Size { cols, rows },
+                rows: s.rows(0, cols).map(|r| r.trim_end().to_string()).collect(),
+                wrapped: (0..rows).map(|r| s.row_wrapped(r)).collect(),
+                formatted: s.contents_formatted(),
+                cursor: s.cursor_position(),
+                alt_screen: s.alternate_screen(),
+                application_cursor: s.application_cursor(),
+            }
+        })
+        .unwrap_or_default()
+    }
+
     /// Escape sequences that redraw the screen (empty if the model failed).
     pub fn formatted(&mut self) -> Vec<u8> {
         self.guard("draw the screen", |p| p.screen().state_formatted()).unwrap_or_default()
@@ -62,6 +81,18 @@ impl Screen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_reads_rows_wraps_and_cursor() {
+        let mut s = Screen::new(4, 5);
+        s.process(b"ab\r\nhello world");
+        let c = s.capture();
+        assert_eq!(c.rows, vec!["ab", "hello", " worl", "d"]);
+        assert_eq!(c.wrapped, vec![false, true, true, false]);
+        assert_eq!(c.cursor, (3, 1));
+        assert_eq!(c.size, swarm_proto::Size { cols: 5, rows: 4 });
+        assert!(!c.alt_screen);
+    }
 
     #[test]
     fn a_panicking_model_is_replaced_and_keeps_working() {

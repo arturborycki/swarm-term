@@ -22,6 +22,9 @@ struct Cli {
     /// Talk to the daemon on this host over ssh instead of the local one.
     #[arg(long, global = true)]
     host: Option<String>,
+    /// Print JSON instead of text (ls, info, new, capture, wait).
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -39,6 +42,12 @@ enum Cmd {
         /// Don't attach; print the new session's id.
         #[arg(short, long)]
         detached: bool,
+        /// Don't attach; wait for the command to exit and exit with its status.
+        #[arg(long)]
+        wait: bool,
+        /// With --wait: give up after this long (like 90s, 10m, 2h) and exit 1.
+        #[arg(long = "for", value_name = "DURATION", value_parser = parse_duration, requires = "wait")]
+        wait_for: Option<Duration>,
         /// Command to run instead of your login shell.
         #[arg(last = true)]
         command: Vec<String>,
@@ -69,8 +78,46 @@ enum Cmd {
         #[arg(value_parser = parse_kv)]
         pairs: Vec<(String, String)>,
     },
-    /// Show everything known about a session.
-    Info { session: String },
+    /// Show everything known about a session (default: the one this runs in).
+    Info { session: Option<String> },
+    /// Type text into a session (standard input if no text is given). Enter
+    /// is pressed only with --enter or a newline in the text.
+    Send {
+        #[command(flatten)]
+        target: Target,
+        /// Press Enter after the text.
+        #[arg(short, long)]
+        enter: bool,
+        text: Option<String>,
+    },
+    /// Press keys in a session: enter, tab, esc, backspace, up, f5, ctrl+c,
+    /// alt+b, shift+tab, ctrl+left, or a single character.
+    SendKey {
+        #[command(flatten)]
+        target: Target,
+        #[arg(required = true)]
+        keys: Vec<String>,
+    },
+    /// Print what a session's screen shows now (the visible rows; `dump`
+    /// prints the scrollback).
+    Capture {
+        #[command(flatten)]
+        target: Target,
+        /// Keep colors and styles as escape sequences.
+        #[arg(long)]
+        ansi: bool,
+        /// Join lines the terminal wrapped.
+        #[arg(long)]
+        unwrap: bool,
+    },
+    /// Wait for a session's program to exit, and exit with its status.
+    Wait {
+        #[command(flatten)]
+        target: Target,
+        /// Give up after this long (like 90s, 10m, 2h) and exit 1.
+        #[arg(long = "for", value_name = "DURATION", value_parser = parse_duration)]
+        wait_for: Option<Duration>,
+    },
     /// Print a session's output: everything still kept, including what was
     /// spilled to disk (`swarmd spill on`), oldest first.
     Dump {
@@ -84,6 +131,15 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
+}
+
+/// The session a command acts on: `-s`, or else the session it runs in.
+#[derive(clap::Args)]
+struct Target {
+    /// Session id, id prefix or name. Default: the session this command
+    /// runs in ($SWARM_SESSION_ID).
+    #[arg(short, long)]
+    session: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -111,6 +167,24 @@ fn parse_kv(s: &str) -> Result<(String, String), String> {
     s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())).ok_or_else(|| format!("expected key=value, got {s}"))
 }
 
+/// Exit statuses besides 0 (done) and the waited-for program's own:
+/// 1 failed, 2 bad command line, 3 no such session (or more than one
+/// matches), 4 the daemon couldn't be reached.
+const EXIT_NOT_FOUND: i32 = 3;
+const EXIT_UNREACHABLE: i32 = 4;
+
+/// An error that ends swarmctl with a particular status.
+#[derive(Debug)]
+struct Exit(i32, String);
+
+impl std::fmt::Display for Exit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for Exit {}
+
 fn main() {
     let cli = Cli::parse();
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
@@ -118,7 +192,7 @@ fn main() {
         Ok(code) => code,
         Err(e) => {
             eprintln!("swarmctl: {e:#}");
-            1
+            e.downcast_ref::<Exit>().map_or(1, |x| x.0)
         }
     };
     rt.shutdown_timeout(Duration::from_millis(100));
@@ -126,10 +200,29 @@ fn main() {
 }
 
 async fn connect(host: &Option<String>) -> Result<Client> {
-    match host {
+    let client = match host {
         Some(h) => Client::connect_ssh(h, "swarmctl").await,
         None => Client::connect_local("swarmctl").await,
+    };
+    client.map_err(|e| Exit(EXIT_UNREACHABLE, format!("{e:#}")).into())
+}
+
+/// A daemon from before a request existed drops the connection when it
+/// gets one: say so instead of "connection lost".
+fn older_daemon(client: &Client, e: anyhow::Error) -> anyhow::Error {
+    let daemon = &client.daemon().version;
+    if daemon != swarm_client::swarm_proto::VERSION
+        && format!("{e:#}").contains("connection to daemon lost")
+    {
+        return anyhow::anyhow!(
+            "swarmd {daemon} on {} is older than this swarmctl ({}) and doesn't support this. \
+             Update it: connect to the host from the Swarm app, or run `swarmctl daemon stop` there \
+             so the next command starts the installed swarmd (sessions keep running)",
+            client.daemon().hostname,
+            swarm_client::swarm_proto::VERSION
+        );
     }
+    e
 }
 
 async fn run(cli: Cli) -> Result<i32> {
@@ -146,12 +239,25 @@ async fn run(cli: Cli) -> Result<i32> {
         return service(&cli.host, args).await;
     }
     let client = connect(&cli.host).await?;
+    let json = cli.json;
     match cmd {
         Cmd::Ls => {
-            print_table(&client.list().await?);
+            let sessions = client.list().await?;
+            if json {
+                print_json(&sessions)?;
+            } else {
+                print_table(&sessions);
+            }
             Ok(0)
         }
-        Cmd::New { name, cwd, detached, command } => {
+        Cmd::New {
+            name,
+            cwd,
+            detached,
+            wait,
+            wait_for,
+            command,
+        } => {
             // A local folder means nothing on another host: start in its home there.
             let cwd = cwd.or_else(|| {
                 if remote {
@@ -163,8 +269,15 @@ async fn run(cli: Cli) -> Result<i32> {
             ui.insert("created_by".into(), "swarmctl".into());
             let opts = CreateOpts { command, cwd, env: Vec::new(), size: terminal_size(), name, ui };
             let info = client.create(opts).await?;
+            if wait {
+                return wait_and_report(&client, &info.id, wait_for, json).await;
+            }
             if detached {
-                println!("{}", info.id);
+                if json {
+                    print_json(&info)?;
+                } else {
+                    println!("{}", info.id);
+                }
                 return Ok(0);
             }
             attach(&client, &info.id, false, false).await
@@ -197,9 +310,102 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Info { session } => {
-            let s = find(&client, &session).await?;
-            print_info(&s);
+            let s = target(&client, session, remote).await?;
+            if json {
+                print_json(&s)?;
+            } else {
+                print_info(&s);
+            }
             Ok(0)
+        }
+        Cmd::Send {
+            target: t,
+            enter,
+            text,
+        } => {
+            let s = target(&client, t.session, remote).await?;
+            let mut data = match text {
+                Some(t) => t.into_bytes(),
+                None => {
+                    let mut buf = Vec::new();
+                    std::io::stdin()
+                        .read_to_end(&mut buf)
+                        .context("read standard input")?;
+                    buf
+                }
+            };
+            if enter {
+                data.push(b'\r');
+            }
+            if !data.is_empty() {
+                client
+                    .write(&s.id, data)
+                    .await
+                    .map_err(|e| older_daemon(&client, e))?;
+            }
+            Ok(0)
+        }
+        Cmd::SendKey { target: t, keys } => {
+            let s = target(&client, t.session, remote).await?;
+            // Arrow, Home and End keys depend on the program's cursor key mode.
+            let app_cursor = if keys.iter().any(|k| keys::mode_dependent(k)) {
+                client
+                    .screen(&s.id)
+                    .await
+                    .map(|c| c.application_cursor)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            let mut data = Vec::new();
+            for k in &keys {
+                data.extend(keys::encode(k, app_cursor).map_err(|e| Exit(2, e))?);
+            }
+            client
+                .write(&s.id, data)
+                .await
+                .map_err(|e| older_daemon(&client, e))?;
+            Ok(0)
+        }
+        Cmd::Capture {
+            target: t,
+            ansi,
+            unwrap,
+        } => {
+            let s = target(&client, t.session, remote).await?;
+            let screen = client
+                .screen(&s.id)
+                .await
+                .map_err(|e| older_daemon(&client, e))?;
+            let lines = screen_lines(&screen, unwrap);
+            let mut out = std::io::stdout().lock();
+            if json {
+                let v = serde_json::json!({
+                    "id": s.id,
+                    "cols": screen.size.cols,
+                    "rows": screen.size.rows,
+                    "cursor": { "row": screen.cursor.0, "col": screen.cursor.1 },
+                    "alt_screen": screen.alt_screen,
+                    "lines": lines,
+                });
+                writeln!(out, "{}", serde_json::to_string_pretty(&v)?)?;
+            } else if ansi {
+                out.write_all(&screen.formatted)?;
+                out.write_all(b"\x1b[0m\n")?;
+            } else {
+                for l in &lines {
+                    writeln!(out, "{l}")?;
+                }
+            }
+            out.flush()?;
+            Ok(0)
+        }
+        Cmd::Wait {
+            target: t,
+            wait_for,
+        } => {
+            let s = target(&client, t.session, remote).await?;
+            wait_and_report(&client, &s.id, wait_for, json).await
         }
         Cmd::Dump { session, raw } => {
             let s = find(&client, &session).await?;
@@ -339,7 +545,146 @@ impl TextFilter {
 
 async fn find(client: &Client, query: &str) -> Result<SessionInfo> {
     let sessions = client.list().await?;
-    resolve(&sessions, query).cloned()
+    resolve(&sessions, query)
+        .cloned()
+        .map_err(|e| Exit(EXIT_NOT_FOUND, format!("{e:#}")).into())
+}
+
+/// The named session, or else the session this command runs in.
+async fn target(client: &Client, session: Option<String>, remote: bool) -> Result<SessionInfo> {
+    if let Some(q) = session {
+        return find(client, &q).await;
+    }
+    match std::env::var("SWARM_SESSION_ID") {
+        Ok(id) if !id.is_empty() && !remote => {
+            let sessions = client.list().await?;
+            sessions.into_iter().find(|s| s.id == id).ok_or_else(|| {
+                Exit(
+                    EXIT_NOT_FOUND,
+                    format!("this session ({id}) isn't on this daemon"),
+                )
+                .into()
+            })
+        }
+        _ => Err(Exit(
+            2,
+            "name a session with -s (outside a Swarm session there's no default)".into(),
+        )
+        .into()),
+    }
+}
+
+fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+/// The screen's rows, without the blank ones at the bottom; with `unwrap`,
+/// rows the terminal wrapped are joined.
+fn screen_lines(screen: &swarm_proto::ScreenCapture, unwrap: bool) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut joining = false;
+    for (i, row) in screen.rows.iter().enumerate() {
+        match lines.last_mut() {
+            Some(last) if joining => last.push_str(row),
+            _ => lines.push(row.clone()),
+        }
+        joining = unwrap && screen.wrapped.get(i).copied().unwrap_or(false);
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+/// Like 90, 90s, 10m, 2h.
+fn parse_duration(s: &str) -> Result<Duration, String> {
+    let (num, unit) = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .map_or((s, ""), |i| s.split_at(i));
+    let n: f64 = num
+        .parse()
+        .map_err(|_| format!("not a duration: {s} (use 90s, 10m or 2h)"))?;
+    let secs = match unit {
+        "" | "s" => n,
+        "ms" => n / 1000.0,
+        "m" => n * 60.0,
+        "h" => n * 3600.0,
+        _ => return Err(format!("not a duration: {s} (use 90s, 10m or 2h)")),
+    };
+    Ok(Duration::from_secs_f64(secs))
+}
+
+/// A program's end: the status a shell would report (the exit code, or
+/// 128 + the signal), its exit code and its signal.
+type ExitInfo = (i32, Option<i32>, Option<i32>);
+
+/// The status a shell would report: the exit code, or 128 + the signal.
+fn exit_status(state: &SessionState) -> Option<ExitInfo> {
+    match state {
+        SessionState::Running => None,
+        SessionState::Exited { code, signal, .. } => {
+            Some((code.unwrap_or(128 + signal.unwrap_or(0)), *code, *signal))
+        }
+    }
+}
+
+/// Waits for the session's program to exit; returns its status.
+async fn wait_exit(client: &Client, id: &str, limit: Option<Duration>) -> Result<ExitInfo> {
+    use tokio::sync::broadcast::error::RecvError;
+    // Subscribe first, then look: an exit between the two isn't missed.
+    let mut events = client.subscribe().await?;
+    let current = |sessions: Vec<SessionInfo>| -> Result<Option<ExitInfo>> {
+        match sessions.into_iter().find(|s| s.id == id) {
+            Some(s) => Ok(exit_status(&s.state)),
+            None => bail!("the session was removed"),
+        }
+    };
+    if let Some(done) = current(client.list().await?)? {
+        return Ok(done);
+    }
+    let watch = async {
+        loop {
+            match events.recv().await {
+                Ok(swarm_proto::SessionEvent::Updated(s)) if s.id == id => {
+                    if let Some(done) = exit_status(&s.state) {
+                        return Ok(done);
+                    }
+                }
+                Ok(swarm_proto::SessionEvent::Removed { id: gone }) if gone == id => {
+                    bail!("the session was removed")
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {
+                    if let Some(done) = current(client.list().await?)? {
+                        return Ok(done);
+                    }
+                }
+                Err(RecvError::Closed) => bail!("connection to daemon lost"),
+            }
+        }
+    };
+    match limit {
+        Some(d) => tokio::time::timeout(d, watch)
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out"))?,
+        None => watch.await,
+    }
+}
+
+async fn wait_and_report(
+    client: &Client,
+    id: &str,
+    limit: Option<Duration>,
+    json: bool,
+) -> Result<i32> {
+    let (status, code, signal) = wait_exit(client, id, limit).await?;
+    if json {
+        print_json(
+            &serde_json::json!({ "id": id, "status": status, "code": code, "signal": signal }),
+        )?;
+    }
+    Ok(status)
 }
 
 fn terminal_size() -> Size {
@@ -584,7 +929,33 @@ async fn reattach(client: &Client, id: &str, from: u64, readonly: bool) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::TextFilter;
+    use super::{parse_duration, screen_lines, TextFilter};
+    use std::time::Duration;
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("90").unwrap(), Duration::from_secs(90));
+        assert_eq!(parse_duration("10m").unwrap(), Duration::from_secs(600));
+        assert_eq!(parse_duration("1.5h").unwrap(), Duration::from_secs(5400));
+        assert!(parse_duration("soon").is_err());
+    }
+
+    #[test]
+    fn screen_lines_trim_and_unwrap() {
+        let screen = swarm_proto::ScreenCapture {
+            rows: vec![
+                "$ echo".into(),
+                "hello".into(),
+                " world".into(),
+                "".into(),
+                "".into(),
+            ],
+            wrapped: vec![false, true, false, false, false],
+            ..Default::default()
+        };
+        assert_eq!(screen_lines(&screen, false), ["$ echo", "hello", " world"]);
+        assert_eq!(screen_lines(&screen, true), ["$ echo", "hello world"]);
+    }
 
     #[test]
     fn text_filter_drops_escapes_split_across_chunks() {
@@ -593,5 +964,151 @@ mod tests {
         out.extend(f.feed(b"6f6f6b\x1b"));
         out.extend(f.feed(b"\\done \x1b]0;title\x07!\n"));
         assert_eq!(String::from_utf8(out).unwrap(), "green\nhook:done !\n");
+    }
+}
+
+mod keys {
+    //! Key names to the bytes an xterm-compatible terminal sends.
+
+    /// Keys whose bytes change with the cursor key mode (DECCKM).
+    pub fn mode_dependent(name: &str) -> bool {
+        let key = name.rsplit('+').next().unwrap_or(name).to_ascii_lowercase();
+        let plain = !name.contains('+');
+        plain
+            && matches!(
+                key.as_str(),
+                "up" | "down" | "left" | "right" | "home" | "end"
+            )
+    }
+
+    pub fn encode(name: &str, app_cursor: bool) -> Result<Vec<u8>, String> {
+        let bad = || format!("unknown key {name:?} (like enter, tab, esc, up, f5, ctrl+c, alt+b)");
+        let parts: Vec<&str> = name.split('+').collect();
+        // `+` itself, and `ctrl++`.
+        let (mods, key) = match parts.as_slice() {
+            [.., "", ""] => (&parts[..parts.len() - 2], "+"),
+            [mods @ .., key] => (mods, *key),
+            [] => return Err(bad()),
+        };
+        let (mut ctrl, mut alt, mut shift) = (false, false, false);
+        for m in mods {
+            match m.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => ctrl = true,
+                "alt" | "opt" | "option" | "meta" => alt = true,
+                "shift" => shift = true,
+                _ => return Err(bad()),
+            }
+        }
+        // xterm's modifier parameter: 1 + shift 1 + alt 2 + ctrl 4.
+        let m = 1 + shift as u8 + 2 * alt as u8 + 4 * ctrl as u8;
+        let lower = key.to_ascii_lowercase();
+        let csi_letter = |c: char| -> Vec<u8> {
+            if m > 1 {
+                format!("\x1b[1;{m}{c}").into_bytes()
+            } else if app_cursor {
+                format!("\x1bO{c}").into_bytes()
+            } else {
+                format!("\x1b[{c}").into_bytes()
+            }
+        };
+        let tilde = |n: u8| -> Vec<u8> {
+            if m > 1 {
+                format!("\x1b[{n};{m}~").into_bytes()
+            } else {
+                format!("\x1b[{n}~").into_bytes()
+            }
+        };
+        let special = match lower.as_str() {
+            "up" => Some(csi_letter('A')),
+            "down" => Some(csi_letter('B')),
+            "right" => Some(csi_letter('C')),
+            "left" => Some(csi_letter('D')),
+            "home" => Some(csi_letter('H')),
+            "end" => Some(csi_letter('F')),
+            "insert" => Some(tilde(2)),
+            "delete" | "del" => Some(tilde(3)),
+            "pageup" | "pgup" => Some(tilde(5)),
+            "pagedown" | "pgdn" => Some(tilde(6)),
+            "f1" | "f2" | "f3" | "f4" => {
+                let c = (b'P' + lower.as_bytes()[1] - b'1') as char;
+                Some(if m > 1 {
+                    format!("\x1b[1;{m}{c}").into_bytes()
+                } else {
+                    format!("\x1bO{c}").into_bytes()
+                })
+            }
+            "f5" => Some(tilde(15)),
+            "f6" => Some(tilde(17)),
+            "f7" => Some(tilde(18)),
+            "f8" => Some(tilde(19)),
+            "f9" => Some(tilde(20)),
+            "f10" => Some(tilde(21)),
+            "f11" => Some(tilde(23)),
+            "f12" => Some(tilde(24)),
+            _ => None,
+        };
+        if let Some(bytes) = special {
+            return Ok(bytes);
+        }
+        let mut bytes = match lower.as_str() {
+            "enter" | "return" | "cr" => vec![b'\r'],
+            "tab" if shift => b"\x1b[Z".to_vec(),
+            "tab" => vec![b'\t'],
+            "esc" | "escape" => vec![0x1b],
+            "backspace" | "bs" => vec![if ctrl { 0x08 } else { 0x7f }],
+            "space" => vec![if ctrl { 0 } else { b' ' }],
+            _ => {
+                let mut chars = key.chars();
+                let (Some(c), None) = (chars.next(), chars.next()) else {
+                    return Err(bad());
+                };
+                let c = if shift { c.to_ascii_uppercase() } else { c };
+                if ctrl {
+                    let b = match c.to_ascii_lowercase() {
+                        c @ 'a'..='z' => c as u8 - b'a' + 1,
+                        '@' | '2' | ' ' => 0,
+                        '[' | '3' => 0x1b,
+                        '\\' | '4' => 0x1c,
+                        ']' | '5' => 0x1d,
+                        '^' | '6' => 0x1e,
+                        '_' | '7' | '/' | '-' => 0x1f,
+                        '?' | '8' => 0x7f,
+                        _ => return Err(bad()),
+                    };
+                    vec![b]
+                } else {
+                    c.to_string().into_bytes()
+                }
+            }
+        };
+        if alt {
+            bytes.insert(0, 0x1b);
+        }
+        Ok(bytes)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::encode;
+
+        #[test]
+        fn names_become_xterm_bytes() {
+            let k = |n: &str| encode(n, false).unwrap();
+            assert_eq!(k("enter"), b"\r");
+            assert_eq!(k("ctrl+c"), [3]);
+            assert_eq!(k("alt+b"), b"\x1bb");
+            assert_eq!(k("shift+tab"), b"\x1b[Z");
+            assert_eq!(k("up"), b"\x1b[A");
+            assert_eq!(encode("up", true).unwrap(), b"\x1bOA");
+            assert_eq!(k("ctrl+left"), b"\x1b[1;5D");
+            assert_eq!(k("f5"), b"\x1b[15~");
+            assert_eq!(k("shift+f5"), b"\x1b[15;2~");
+            assert_eq!(k("f1"), b"\x1bOP");
+            assert_eq!(k("q"), b"q");
+            assert_eq!(k("shift+a"), b"A");
+            assert_eq!(k("+"), b"+");
+            assert!(encode("hyper+x", false).is_err());
+            assert!(encode("nope", false).is_err());
+        }
     }
 }

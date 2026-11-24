@@ -154,6 +154,30 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
         </tbody>
       </table>
 
+      <h3 id="scripting">Scripts and agents</h3>
+      <p>
+        These commands drive a session without attaching to it, so a script or a coding agent can run something in one
+        session and read the result. They take the session with <code>-s</code>; run inside a Swarm session, they act on
+        that session by default.
+      </p>
+      <table>
+        <tbody>
+          <tr><td><code>swarmctl send -s build --enter 'make test'</code></td><td>Type text into the session (standard input if no text). Enter is pressed only with <code>--enter</code>.</td></tr>
+          <tr><td><code>swarmctl send-key -s build ctrl+c</code></td><td>Press keys: <code>enter</code>, <code>tab</code>, <code>esc</code>, <code>up</code>, <code>f5</code>, <code>ctrl+c</code>, <code>alt+b</code>, <code>shift+tab</code>…</td></tr>
+          <tr><td><code>swarmctl capture -s build</code></td><td>Print what the screen shows now, full-screen programs included. <code>--unwrap</code> joins wrapped lines, <code>--ansi</code> keeps colors.</td></tr>
+          <tr><td><code>swarmctl wait -s build --for 10m</code></td><td>Wait for the session's program to exit, and exit with its status.</td></tr>
+          <tr><td><code>swarmctl new --wait -- make test</code></td><td>Run a command in a new session and exit with its status.</td></tr>
+        </tbody>
+      </table>
+      <p>
+        <code>ls</code>, <code>info</code>, <code>new -d</code>, <code>capture</code> and <code>wait</code> print JSON with
+        <code>--json</code>. Exit statuses: 0 done, 1 failed (or <code>wait</code> timed out), 2 bad command line, 3 no
+        such session or more than one matches, 4 the daemon couldn't be reached; <code>wait</code> exits with the
+        program's own status.
+      </p>
+      <pre class="term"><span class="p">$</span> swarmctl new -d -n tests -- sh -c 'make test'
+<span class="p">$</span> swarmctl wait -s tests || swarmctl capture -s tests</pre>
+
       <h2 id="daemon">The daemon</h2>
       <p>
         <code>swarmd</code> starts with the app by default. To have sessions survive logout and start the daemon at

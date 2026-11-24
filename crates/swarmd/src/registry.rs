@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use swarm_proto::{
-    paths, read_frame, write_frame, AttachMode, ClientDesc, CreateOpts, MetaUpdate, SessionEvent, SessionId,
-    SessionInfo, ShimMsg, ShimRequest, ShimUpgrade, ShimUpgradeOutcome, Size,
+    paths, read_frame, write_frame, AttachMode, ClientDesc, CreateOpts, MetaUpdate, ScreenCapture, SessionEvent,
+    SessionId, SessionInfo, ShimMsg, ShimRequest, ShimUpgrade, ShimUpgradeOutcome, Size,
 };
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
@@ -522,6 +522,23 @@ impl Registry {
     pub async fn set_meta(&self, id: &str, update: MetaUpdate) -> Result<SessionInfo> {
         self.simple(id, ShimRequest::SetMeta(update)).await?;
         self.info(id).await
+    }
+
+    pub async fn write(&self, id: &str, data: Vec<u8>) -> Result<()> {
+        self.simple(id, ShimRequest::Write(data)).await
+    }
+
+    pub async fn screen(&self, id: &str) -> Result<ScreenCapture> {
+        timed(SHIM_TIMEOUT, async {
+            let mut stream = self.connect(id).await?;
+            write_frame(&mut stream, &ShimRequest::Screen).await?;
+            match read_frame::<_, ShimMsg>(&mut stream).await? {
+                Some(ShimMsg::Screen(screen)) => Ok(screen),
+                None => bail!("its shim is from an older build that doesn't support this"),
+                other => bail!("unexpected reply {other:?}"),
+            }
+        })
+        .await
     }
 
     pub async fn info(&self, id: &str) -> Result<SessionInfo> {

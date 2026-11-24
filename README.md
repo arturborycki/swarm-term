@@ -76,7 +76,9 @@ Inside the session, press Ctrl-\ to detach. Then:
 ```
 
 Other commands: `swarmctl rename`, `kill`, `rm`, `info`, `meta`, `dump`,
-`daemon status|stop|upgrade-shims`. The daemon starts on first use;
+`daemon status|stop|upgrade-shims`. For scripts and agents, `send`,
+`send-key`, `capture` and `wait` drive a session without attaching to it
+(`-s <session>`, or the session they run in), and `--json` prints JSON. The daemon starts on first use;
 `swarmd stop` stops it without ending any session.
 
 To start the daemon at login instead (launchd agent on macOS, systemd user unit
