@@ -314,6 +314,28 @@ impl Client {
         }
     }
 
+    /// Types `data` into a session without attaching to it.
+    pub async fn write(&self, id: &str, data: Vec<u8>) -> Result<()> {
+        match self
+            .request(Request::Write {
+                id: id.into(),
+                data,
+            })
+            .await?
+        {
+            Response::Ok => Ok(()),
+            other => bail!("unexpected {other:?}"),
+        }
+    }
+
+    /// The session's screen as it looks now.
+    pub async fn screen(&self, id: &str) -> Result<swarm_proto::ScreenCapture> {
+        match self.request(Request::Screen { id: id.into() }).await? {
+            Response::Screen(screen) => Ok(screen),
+            other => bail!("unexpected {other:?}"),
+        }
+    }
+
     pub async fn shutdown_daemon(&self) -> Result<()> {
         self.request(Request::Shutdown).await.map(|_| ())
     }

@@ -579,6 +579,26 @@ impl Session {
                 self.notify(&mut inner, true);
             }
         }
+        self.queue_input(inner, data);
+    }
+
+    /// Input from outside any attachment (`swarmctl send`): no size change.
+    pub fn write(&self, data: Vec<u8>) -> Result<()> {
+        let inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !inner.info.is_running() {
+            anyhow::bail!("the session has exited");
+        }
+        self.queue_input(inner, data);
+        Ok(())
+    }
+
+    /// The screen as the terminal model has it now.
+    pub fn capture(&self) -> swarm_proto::ScreenCapture {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.screen.capture()
+    }
+
+    fn queue_input(&self, mut inner: std::sync::MutexGuard<'_, Inner>, data: Vec<u8>) {
         inner.info.last_input_ms = now_ms();
         // A program that doesn't read its input (stopped, or busy) leaves it
         // queued here; past the cap, more is dropped rather than held. Counted

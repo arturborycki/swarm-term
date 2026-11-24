@@ -219,6 +219,54 @@ async fn create_attach_detach_and_replay() {
 }
 
 #[tokio::test]
+async fn write_and_screen_work_without_attaching() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let info = c.create(sh_opts("scripted")).await.unwrap();
+
+    // Typed without any attachment, as `swarmctl send` does.
+    c.write(&info.id, b"echo typed-$((40+2))\r".to_vec())
+        .await
+        .unwrap();
+    let screen = timeout(Duration::from_secs(10), async {
+        loop {
+            let s = c.screen(&info.id).await.unwrap();
+            if s.rows.iter().any(|r| r == "typed-42") {
+                return s;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the output never reached the screen");
+    assert_eq!(screen.size, Size { cols: 80, rows: 24 });
+    assert!(!screen.alt_screen);
+    assert!(
+        c.list().await.unwrap()[0].clients.is_empty(),
+        "nothing stays attached"
+    );
+
+    c.write(&info.id, b"exit 7\r".to_vec()).await.unwrap();
+    let state = timeout(Duration::from_secs(10), async {
+        loop {
+            let s = c.list().await.unwrap().remove(0);
+            if !s.is_running() {
+                return s.state;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the session never exited");
+    assert!(matches!(
+        state,
+        swarm_proto::SessionState::Exited { code: Some(7), .. }
+    ));
+    let err = c.write(&info.id, b"too late\r".to_vec()).await.unwrap_err();
+    assert!(format!("{err:#}").contains("exited"), "{err:#}");
+}
+
+#[tokio::test]
 async fn close_drops_the_connection_but_not_the_session() {
     let env = Env::new().await;
     let c = env.client().await;

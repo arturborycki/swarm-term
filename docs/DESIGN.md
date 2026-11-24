@@ -194,7 +194,10 @@ Request::SetMeta { id, MetaUpdate { name, ui } }        → Session(SessionInfo)
 Request::Attach { id, mode, size, readonly }            → Attached { stream, info, replay_from, live_from }
 Request::Subscribe                                      → Ok, then ServerMsg::Event(Created | Updated | Removed)
 Request::Shutdown                                       → Ok   (daemon exits; sessions keep running)
+Request::Write { id, data }                             → Ok   (typed into the session with no attachment: `swarmctl send`)
+Request::Screen { id }                                  → Screen(ScreenCapture)     (visible rows, wraps, cursor, from the shim's vt100 model: `swarmctl capture`)
 ```
+New variants go at the end of each enum: postcard encodes them by position, and a daemon or shim from an older build closes the connection on a request it can't decode (swarmctl reports that as an older daemon).
 `AttachMode` is `Full` (replay from the oldest buffered boundary), `ResumeFrom(offset)` (falls back to `Full` if no longer buffered) or `Live`.
 
 ### Per attachment (relayed by swarmd)

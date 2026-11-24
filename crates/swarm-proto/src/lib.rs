@@ -164,6 +164,11 @@ pub enum Request {
     UpgradeShims { force: bool },
     /// Re-read the spill-to-disk setting and apply it to running sessions.
     ApplySpill,
+    // New variants go last: older daemons decode requests by position.
+    /// Type `data` into the session, as a client would, without attaching.
+    Write { id: SessionId, data: Vec<u8> },
+    /// The session's screen as it looks now.
+    Screen { id: SessionId },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -181,6 +186,26 @@ pub enum Response {
         live_from: u64,
     },
     ShimsUpgraded(Vec<ShimUpgrade>),
+    // New variants go last.
+    Screen(ScreenCapture),
+}
+
+/// A session's screen: the visible rows (no scrollback), as the shim's
+/// terminal model has them.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScreenCapture {
+    pub size: Size,
+    /// One string per row, trailing blanks removed.
+    pub rows: Vec<String>,
+    /// For each row, whether it continues on the next (the line was wrapped).
+    pub wrapped: Vec<bool>,
+    /// Escape sequences that draw the screen, colors included.
+    pub formatted: Vec<u8>,
+    /// Cursor (row, column), from zero.
+    pub cursor: (u16, u16),
+    pub alt_screen: bool,
+    /// Whether the program asked for application cursor keys (DECCKM).
+    pub application_cursor: bool,
 }
 
 /// What `UpgradeShims` did with one session.
@@ -256,6 +281,10 @@ pub enum ShimRequest {
     /// Start (`Some`) or stop spilling output that leaves the in-memory
     /// buffer to disk. Stopping deletes what was spilled.
     SetSpill(Option<SpillConfig>),
+    /// Type into the session without an attachment (`swarmctl send`).
+    Write(Vec<u8>),
+    /// Answered with `ShimMsg::Screen`.
+    Screen,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -278,6 +307,8 @@ pub enum ShimMsg {
     /// `build_id` of the running shim program, the handoff format it reads
     /// and writes, and how many times it has been replaced in place.
     Version { build_id: String, handoff: u32, generation: u32 },
+    // New variants go last.
+    Screen(ScreenCapture),
 }
 
 /// Hex encoding, used to pass `CreateOpts` to a shim on its command line.

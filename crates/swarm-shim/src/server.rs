@@ -74,6 +74,14 @@ async fn handle(
             };
             write_frame(&mut wr, &reply).await
         }
+        ShimRequest::Write(data) => {
+            let reply = match session.write(data) {
+                Ok(()) => ShimMsg::Ok,
+                Err(e) => ShimMsg::Err(format!("{e:#}")),
+            };
+            write_frame(&mut wr, &reply).await
+        }
+        ShimRequest::Screen => write_frame(&mut wr, &ShimMsg::Screen(session.capture())).await,
         ShimRequest::Version => {
             let reply = ShimMsg::Version {
                 build_id: swarm_proto::BUILD_ID.to_string(),
