@@ -7,6 +7,7 @@ mod scan;
 mod screen;
 mod server;
 mod session;
+mod status;
 pub mod spill;
 
 use std::os::fd::{AsRawFd, FromRawFd};

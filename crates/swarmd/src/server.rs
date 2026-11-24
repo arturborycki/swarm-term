@@ -101,6 +101,7 @@ impl Server {
         let mut next_stream: StreamId = 1;
         let mut tasks = Vec::new();
         let mut subscribed = false;
+        let mut status_subscribed = false;
 
         while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
             // A connection can live for weeks (the app lists sessions every
@@ -138,6 +139,35 @@ impl Server {
                     let out = out_tx.clone();
                     tasks.push(tokio::spawn(async move {
                         relay(registry, out, id, stream, sid, desc, mode, size, in_rx).await;
+                    }));
+                }
+                ClientMsg::Request { id, req: Request::SubscribeStatus } => {
+                    let _ = out_tx.send(ServerMsg::Response { id, result: Ok(Response::Ok) }).await;
+                    if status_subscribed {
+                        continue;
+                    }
+                    status_subscribed = true;
+                    let mut changes = self.registry.subscribe_status();
+                    let registry = self.registry.clone();
+                    let out = out_tx.clone();
+                    tasks.push(tokio::spawn(async move {
+                        loop {
+                            let sent = match changes.recv().await {
+                                Ok((id, status)) => out.send(ServerMsg::Status { id, status }).await.is_ok(),
+                                Err(broadcast::error::RecvError::Lagged(_)) => {
+                                    // Changes were missed: send every session's current status.
+                                    let mut ok = true;
+                                    for (id, status) in registry.statuses() {
+                                        ok &= out.send(ServerMsg::Status { id, status }).await.is_ok();
+                                    }
+                                    ok
+                                }
+                                Err(broadcast::error::RecvError::Closed) => false,
+                            };
+                            if !sent {
+                                break;
+                            }
+                        }
                     }));
                 }
                 ClientMsg::Request { id, req: Request::Subscribe } if subscribed => {
@@ -226,7 +256,14 @@ impl Server {
                 Response::Ok
             }
             Request::Screen { id } => Response::Screen(r.screen(&id).await?),
-            Request::Attach { .. } | Request::Subscribe => unreachable!("handled by the connection loop"),
+            Request::Status => Response::Statuses(r.statuses()),
+            Request::ClearStatus { id } => {
+                r.clear_status(&id).await?;
+                Response::Ok
+            }
+            Request::Attach { .. } | Request::Subscribe | Request::SubscribeStatus => {
+                unreachable!("handled by the connection loop")
+            }
         })
     }
 }

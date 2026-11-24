@@ -11,8 +11,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use swarm_proto::{
-    now_ms, AttachMode, ClientDesc, CreateOpts, MetaUpdate, SessionInfo, SessionState, ShimMsg, Size, SpillConfig,
+    now_ms, AttachMode, ClientDesc, CreateOpts, MetaUpdate, ProgramStatus, SessionInfo, SessionState, ShimMsg, Size,
+    SpillConfig,
 };
+
+use crate::status::{StatusBook, StatusSignal};
 use tokio::sync::{mpsc, watch};
 
 use crate::buffer::Ring;
@@ -36,6 +39,10 @@ pub struct Session {
     /// Bytes of input queued for the writer thread and not yet written.
     pub(crate) pending_input: Arc<AtomicUsize>,
     info_tx: watch::Sender<SessionInfo>,
+    /// What the programs report about themselves. Not handed over in an
+    /// in-place update: the new program starts with none.
+    status: Mutex<StatusBook>,
+    status_tx: watch::Sender<ProgramStatus>,
     pid: u32,
     reader_done: (Mutex<bool>, Condvar),
     pub(crate) reader_ctl: ReaderCtl,
@@ -308,6 +315,8 @@ impl Session {
             input_tx,
             pending_input: pending_input.clone(),
             info_tx,
+            status: Mutex::new(StatusBook::default()),
+            status_tx: watch::channel(ProgramStatus::default()).0,
             pid,
             reader_done: (Mutex::new(false), Condvar::new()),
             reader_ctl: ReaderCtl::default(),
@@ -393,7 +402,9 @@ impl Session {
         for b in ev.boundaries {
             inner.ring.add_boundary(b);
         }
+        let mut prompt = false;
         for hook in ev.hooks {
+            prompt |= hook.name == "Precmd";
             if TIMED_HOOKS.contains(&hook.name.as_str()) {
                 inner.ring.add_time(hook.start, now_ms());
             }
@@ -447,6 +458,9 @@ impl Session {
             inner.info.alt_screen = a;
         }
         inner.info.last_output_ms = now_ms();
+        if !ev.status.is_empty() || prompt {
+            self.apply_status(ev.status, prompt);
+        }
 
         let mut dropped = Vec::new();
         for (id, slot) in &inner.clients {
@@ -473,6 +487,12 @@ impl Session {
 
         let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.info.state = SessionState::Exited { code, signal, at_ms: now_ms() };
+        {
+            let mut book = self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if book.on_exit(now_ms()) {
+                self.status_tx.send_replace(book.snapshot());
+            }
+        }
         for slot in inner.clients.values() {
             let _ = slot.tx.try_send(ShimMsg::Exited { code, signal });
         }
@@ -590,6 +610,52 @@ impl Session {
         }
         self.queue_input(inner, data);
         Ok(())
+    }
+
+    /// Applies status signals from output (and a prompt seen through Warp's
+    /// hooks); answers `OSC 7501 ; ?`. Called with `inner` held.
+    fn apply_status(&self, signals: Vec<StatusSignal>, prompt: bool) {
+        let now = now_ms();
+        let mut book = self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut changed = false;
+        let mut query = false;
+        for signal in signals {
+            query |= signal == StatusSignal::Query;
+            changed |= book.apply(signal, now);
+        }
+        if prompt {
+            changed |= book.apply(StatusSignal::Prompt, now);
+        }
+        if changed {
+            self.status_tx.send_replace(book.snapshot());
+        }
+        drop(book);
+        if query {
+            // Answered once, by the shim: the terminals showing the session
+            // may not know the protocol.
+            let reply = crate::status::QUERY_REPLY.to_vec();
+            let len = reply.len();
+            self.pending_input.fetch_add(len, Ordering::AcqRel);
+            if self.input_tx.send(reply).is_err() {
+                self.pending_input.fetch_sub(len, Ordering::AcqRel);
+            }
+        }
+    }
+
+    pub fn program_status(&self) -> ProgramStatus {
+        self.status_tx.borrow().clone()
+    }
+
+    pub fn watch_status(&self) -> watch::Receiver<ProgramStatus> {
+        self.status_tx.subscribe()
+    }
+
+    /// The user has seen the session.
+    pub fn clear_status(&self) {
+        let mut book = self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if book.clear_seen(now_ms()) {
+            self.status_tx.send_replace(book.snapshot());
+        }
     }
 
     /// The screen as the terminal model has it now.

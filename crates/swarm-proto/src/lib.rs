@@ -169,6 +169,13 @@ pub enum Request {
     Write { id: SessionId, data: Vec<u8> },
     /// The session's screen as it looks now.
     Screen { id: SessionId },
+    /// What the programs in every session report about themselves.
+    Status,
+    /// Start receiving [`ServerMsg::Status`] on this connection.
+    SubscribeStatus,
+    /// The user has seen the session: drop its `done` and `error` records
+    /// and its last notification.
+    ClearStatus { id: SessionId },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -188,6 +195,7 @@ pub enum Response {
     ShimsUpgraded(Vec<ShimUpgrade>),
     // New variants go last.
     Screen(ScreenCapture),
+    Statuses(Vec<(SessionId, ProgramStatus)>),
 }
 
 /// A session's screen: the visible rows (no scrollback), as the shim's
@@ -253,6 +261,9 @@ pub enum ServerMsg {
     Lagged { stream: StreamId, resume_at: u64 },
     StreamClosed { stream: StreamId, reason: String },
     Event(SessionEvent),
+    // New variants go last. Sent only after `Request::SubscribeStatus`.
+    /// A session's program status changed.
+    Status { id: SessionId, status: ProgramStatus },
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +296,12 @@ pub enum ShimRequest {
     Write(Vec<u8>),
     /// Answered with `ShimMsg::Screen`.
     Screen,
+    /// Answered with `ShimMsg::Status`.
+    Status,
+    /// Like `Status`, then another `ShimMsg::Status` on every change.
+    WatchStatus,
+    /// The user has seen the session (see `Request::ClearStatus`).
+    ClearStatus,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -309,6 +326,127 @@ pub enum ShimMsg {
     Version { build_id: String, handoff: u32, generation: u32 },
     // New variants go last.
     Screen(ScreenCapture),
+    Status(ProgramStatus),
+}
+
+// ---------------------------------------------------------------------------
+// Program status: what programs say about themselves through escape sequences
+// (OSC 7501, the Program Status Protocol, and OSC 9;4 progress), plus bells,
+// desktop notifications (OSC 9, 777, 99) and command exit codes (OSC 133;D).
+
+// Lowercase names in JSON (`swarmctl --json`); postcard uses positions.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusState {
+    /// At rest, waiting for the user's next instruction.
+    Idle,
+    /// Running; may carry progress.
+    Working,
+    /// Finished; the result is ready and the user hasn't seen it yet.
+    Done,
+    /// Failed and stopped.
+    Error,
+    /// Can't continue until the user does something.
+    Blocked,
+}
+
+impl StatusState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StatusState::Idle => "idle",
+            StatusState::Working => "working",
+            StatusState::Done => "done",
+            StatusState::Error => "error",
+            StatusState::Blocked => "blocked",
+        }
+    }
+}
+
+/// What a blocked program waits for.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockedKind {
+    /// Approval to do something.
+    Permission,
+    /// An answer the user must type.
+    Question,
+    /// A login, token or credential.
+    Auth,
+}
+
+impl BlockedKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BlockedKind::Permission => "permission",
+            BlockedKind::Question => "question",
+            BlockedKind::Auth => "auth",
+        }
+    }
+}
+
+/// One status record. The program's own is the root record (`id` empty);
+/// it may report others, like `build/test`, for work it does in parallel.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StatusRecord {
+    pub id: String,
+    pub state: StatusState,
+    /// Only with `Blocked`.
+    pub kind: Option<BlockedKind>,
+    /// 0 to 100, with `Working` or `Blocked`; `None` is indeterminate.
+    pub progress: Option<u8>,
+    /// Stable program identifier (`cargo`, `claude-code`), inherited from
+    /// the nearest ancestor record that has one.
+    pub app: Option<String>,
+    /// Short label, for programs that report several records.
+    pub title: Option<String>,
+    /// One line: what it's doing, waiting for, or finished.
+    pub msg: Option<String>,
+    pub updated_ms: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Notification {
+    pub title: String,
+    pub body: String,
+    pub at_ms: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProgramStatus {
+    /// Sorted by id; the root record (if any) first.
+    pub records: Vec<StatusRecord>,
+    /// Bells rung since the session started, and when the last one rang.
+    pub bells: u64,
+    pub bell_ms: u64,
+    /// The last desktop notification the program asked for, until the user
+    /// has seen the session.
+    pub notification: Option<Notification>,
+    /// Exit code of the last command the shell finished (OSC 133;D), and when.
+    pub last_exit: Option<(i32, u64)>,
+    /// When any of this last changed.
+    pub changed_ms: u64,
+}
+
+impl ProgramStatus {
+    /// The record that most needs the user: blocked, then error, done,
+    /// working, idle; the most recent among equals.
+    pub fn headline(&self) -> Option<&StatusRecord> {
+        self.records.iter().max_by_key(|r| (r.state, r.updated_ms))
+    }
+
+    /// `record`'s app, or the nearest ancestor's.
+    pub fn app_of<'a>(&'a self, record: &'a StatusRecord) -> Option<&'a str> {
+        let mut id = record.id.as_str();
+        loop {
+            if let Some(app) = self.records.iter().find(|r| r.id == id).and_then(|r| r.app.as_deref()) {
+                return Some(app);
+            }
+            if id.is_empty() {
+                return None;
+            }
+            id = id.rfind('/').map_or("", |i| &id[..i]);
+        }
+    }
 }
 
 /// Hex encoding, used to pass `CreateOpts` to a shim on its command line.

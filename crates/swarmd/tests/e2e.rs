@@ -266,6 +266,93 @@ async fn write_and_screen_work_without_attaching() {
     assert!(format!("{err:#}").contains("exited"), "{err:#}");
 }
 
+/// Polls `status()` until `pred` holds for session `id`.
+async fn status_until(
+    c: &Client,
+    id: &str,
+    pred: impl Fn(&swarm_proto::ProgramStatus) -> bool,
+) -> swarm_proto::ProgramStatus {
+    let mut last = None;
+    let res = timeout(Duration::from_secs(10), async {
+        loop {
+            let all = c.status().await.unwrap();
+            let st = all.into_iter().find(|(sid, _)| sid == id).map(|(_, st)| st).unwrap_or_default();
+            if pred(&st) {
+                return st;
+            }
+            last = Some(st);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    res.unwrap_or_else(|_| panic!("status never matched; last {last:?}"))
+}
+
+#[tokio::test]
+async fn programs_report_status_through_escape_sequences() {
+    use swarm_proto::{BlockedKind, StatusState};
+    let env = Env::new().await;
+    let c = env.client().await;
+    let info = c.create(sh_opts("agent")).await.unwrap();
+    let mut changes = c.subscribe_status().await.unwrap();
+
+    // "Hi?" in base64, then a bell and an iTerm2 notification.
+    c.write(
+        &info.id,
+        b"printf '\\033]7501;state=blocked:kind=question:app=claude-code:msg=SGk/\\033\\\\\\007\\033]9;Needs you\\007'\r"
+            .to_vec(),
+    )
+    .await
+    .unwrap();
+    let st = status_until(&c, &info.id, |st| !st.records.is_empty() && st.notification.is_some()).await;
+    let r = st.headline().unwrap();
+    assert_eq!(r.state, StatusState::Blocked);
+    assert_eq!(r.kind, Some(BlockedKind::Question));
+    assert_eq!(r.app.as_deref(), Some("claude-code"));
+    assert_eq!(r.msg.as_deref(), Some("Hi?"));
+    assert_eq!(st.notification.as_ref().unwrap().body, "Needs you");
+    assert!(st.bells >= 1);
+    // Subscribers were told.
+    let (id, pushed) = timeout(Duration::from_secs(5), changes.recv()).await.unwrap().unwrap();
+    assert_eq!(id, info.id);
+    assert!(!pushed.records.is_empty() || pushed.bells > 0);
+
+    // A new prompt ends `blocked`; `done` stays until the session is seen.
+    c.write(&info.id, b"printf '\\033]7501;state=done:id=build\\007\\033]133;A\\007'\r".to_vec()).await.unwrap();
+    let st = status_until(&c, &info.id, |st| st.records.len() == 1 && st.records[0].id == "build").await;
+    assert_eq!((st.records[0].id.as_str(), st.records[0].state), ("build", StatusState::Done));
+    c.clear_status(&info.id).await.unwrap();
+    let st = status_until(&c, &info.id, |st| st.records.is_empty()).await;
+    assert!(st.notification.is_none());
+}
+
+#[tokio::test]
+async fn the_shim_answers_the_status_query() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let mut opts = sh_opts("query");
+    // Reads the reply as typed input and prints it in octal.
+    opts.command = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "stty raw -echo; printf '\\033]7501;?\\033\\\\'; reply=$(dd bs=1 count=10 2>/dev/null | od -An -c | tr -d ' \\n'); stty sane; echo \"got:$reply\"; sleep 5".into(),
+    ];
+    let info = c.create(opts).await.unwrap();
+    let screen = timeout(Duration::from_secs(10), async {
+        loop {
+            let s = c.screen(&info.id).await.unwrap();
+            if s.rows.iter().any(|r| r.starts_with("got:")) {
+                return s;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("no reply to the query");
+    let line = screen.rows.iter().find(|r| r.starts_with("got:")).unwrap();
+    assert_eq!(line, r"got:033]7501;?033\", "{line}");
+}
+
 #[tokio::test]
 async fn close_drops_the_connection_but_not_the_session() {
     let env = Env::new().await;

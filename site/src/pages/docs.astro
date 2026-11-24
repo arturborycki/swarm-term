@@ -167,6 +167,9 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
           <tr><td><code>swarmctl capture -s build</code></td><td>Print what the screen shows now, full-screen programs included. <code>--unwrap</code> joins wrapped lines, <code>--ansi</code> keeps colors.</td></tr>
           <tr><td><code>swarmctl wait -s build --for 10m</code></td><td>Wait for the session's program to exit, and exit with its status.</td></tr>
           <tr><td><code>swarmctl new --wait -- make test</code></td><td>Run a command in a new session and exit with its status.</td></tr>
+          <tr><td><code>swarmctl status</code></td><td>What programs report about themselves in every session: working, blocked (waiting for you), done or error. <code>-s</code> for one session, <code>--clear</code> to mark it seen.</td></tr>
+          <tr><td><code>swarmctl wait -s agent --until blocked,done</code></td><td>Wait until a program needs you or finishes.</td></tr>
+          <tr><td><code>swarmctl events</code></td><td>Print changes as they happen: sessions created, exited or renamed, status, bells and notifications. One JSON object per line with <code>--json</code>.</td></tr>
         </tbody>
       </table>
       <p>
@@ -177,6 +180,20 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
       </p>
       <pre class="term"><span class="p">$</span> swarmctl new -d -n tests -- sh -c 'make test'
 <span class="p">$</span> swarmctl wait -s tests || swarmctl capture -s tests</pre>
+
+      <h3 id="program-status">Program status</h3>
+      <p>
+        Programs can tell Swarm what they're doing with the open
+        <a href="https://www.superlogical.com/rex/docs/build/program-status">Program Status Protocol</a> (OSC 7501):
+        working, blocked on you (for a permission, an answer or a login), done or failed, with a one-line message. Swarm
+        also counts bells, keeps the last desktop notification a program asked for (OSC 9, 777 and 99), reads progress
+        (OSC 9;4) and the exit code of each command your shell reports (OSC 133). A new prompt or the program exiting
+        ends "working" and "blocked"; "done" and "error" stay until the session is seen.
+      </p>
+      <p>From a script, one line reports a state, with the message in base64:</p>
+      <pre class="term">status() &#123; printf '\e]7501;state=%s:msg=%s\e\\' "$1" "$(printf '%s' "$2" | base64 | tr -d '\n')"; &#125;
+status working "Syncing photos"
+rsync -a ~/Photos backup:/photos &amp;&amp; status done "Photos synced" || status error "rsync failed"</pre>
 
       <h2 id="daemon">The daemon</h2>
       <p>

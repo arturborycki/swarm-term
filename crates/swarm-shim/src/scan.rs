@@ -4,6 +4,8 @@
 
 use vte::{Params, Parser, Perform};
 
+use crate::status::StatusSignal;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ScanEvents {
     pub title: Option<String>,
@@ -14,6 +16,8 @@ pub struct ScanEvents {
     pub boundaries: Vec<u64>,
     /// Warp lifecycle hooks (`ESC P $ d <hex JSON> ESC \\`) that ended here.
     pub hooks: Vec<WarpHook>,
+    /// Program status reports, notifications, bells, prompts, in order.
+    pub status: Vec<StatusSignal>,
 }
 
 /// A Warp shell hook: its name (`InitShell`, `Bootstrapped`, `Precmd`, …) and
@@ -120,6 +124,50 @@ impl Perform for Collector {
             // FinalTerm / iTerm2 / VS Code shell integration: prompt start.
             b"133" if params.get(1).is_some_and(|p| p.first() == Some(&b'A')) => {
                 self.events.boundaries.push(self.dispatch_start());
+                self.events.status.push(StatusSignal::Prompt);
+            }
+            // Command finished, with its exit code.
+            b"133" if params.get(1).is_some_and(|p| p.first() == Some(&b'D')) => {
+                let code = params.get(2).and_then(|c| std::str::from_utf8(c).ok()).and_then(|c| c.trim().parse().ok());
+                self.events.status.push(StatusSignal::CommandEnd(code));
+            }
+            // Program Status Protocol. Its bodies never contain ';'. A body
+            // the parser had to cut off was too long anyway.
+            b"7501" if params.len() == 2 && params[1].len() < OSC_BUF - 16 => {
+                self.events.status.push(if params[1] == b"?" {
+                    StatusSignal::Query
+                } else {
+                    StatusSignal::Report(params[1].to_vec())
+                });
+            }
+            // ConEmu progress: OSC 9 ; 4 ; state ; progress.
+            b"9" if params.get(1) == Some(&&b"4"[..]) => {
+                let num = |i: usize| params.get(i).and_then(|p| std::str::from_utf8(p).ok()).and_then(|p| p.parse::<u8>().ok());
+                if let Some(state) = num(2) {
+                    self.events.status.push(StatusSignal::Progress { state, value: num(3) });
+                }
+            }
+            // iTerm2 notification: OSC 9 ; text.
+            b"9" if params.len() > 1 => {
+                let body = String::from_utf8_lossy(&params[1..].join(&b';')).into_owned();
+                self.events.status.push(StatusSignal::Notify { title: String::new(), body });
+            }
+            // rxvt notification: OSC 777 ; notify ; title ; body.
+            b"777" if params.get(1) == Some(&&b"notify"[..]) => {
+                let title = params.get(2).map(|t| String::from_utf8_lossy(t).into_owned()).unwrap_or_default();
+                let body = String::from_utf8_lossy(&params.get(3..).unwrap_or(&[]).join(&b';')).into_owned();
+                self.events.status.push(StatusSignal::Notify { title, body });
+            }
+            // kitty notification: OSC 99 ; metadata ; payload. Only whole,
+            // plain-text payloads (no `e=1` base64, no `d=0` chunks).
+            b"99" if params.len() > 2 => {
+                let meta = String::from_utf8_lossy(params[1]);
+                let keys: Vec<&str> = meta.split(':').collect();
+                if !keys.contains(&"e=1") && !keys.contains(&"d=0") {
+                    let text = String::from_utf8_lossy(&params[2..].join(&b';')).into_owned();
+                    let (title, body) = if keys.contains(&"p=body") { (String::new(), text) } else { (text, String::new()) };
+                    self.events.status.push(StatusSignal::Notify { title, body });
+                }
             }
             _ => {}
         }
@@ -143,6 +191,18 @@ impl Perform for Collector {
         let Some((start, hex)) = self.dcs.take() else { return };
         if let Some(name) = hook_name(&hex) {
             self.events.hooks.push(WarpHook { name, start, end: self.pos + 1 });
+        }
+    }
+
+    fn execute(&mut self, byte: u8) {
+        if byte == 0x07 {
+            self.events.status.push(StatusSignal::Bell);
+        }
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        if intermediates.is_empty() && byte == b'c' {
+            self.events.status.push(StatusSignal::Reset);
         }
     }
 
@@ -269,6 +329,37 @@ mod tests {
         let mut s = Scanner::default();
         let ev = s.feed(0, b"\x1bP1$r0m\x1b\\");
         assert!(ev.hooks.is_empty());
+    }
+
+    #[test]
+    fn status_signals_in_order() {
+        let mut s = Scanner::default();
+        let ev = s.feed(
+            0,
+            b"a\x07\x1b]7501;state=working:app=x\x1b\\\x1b]7501;?\x07\x1b]9;4;1;40\x07\x1b]9;Done; really\x07\
+              \x1b]777;notify;Build;ok\x07\x1b]99;i=1:p=body;hi\x1b\\\x1b]133;D;2\x07\x1b]133;A\x07\x1bc",
+        );
+        assert_eq!(
+            ev.status,
+            vec![
+                StatusSignal::Bell,
+                StatusSignal::Report(b"state=working:app=x".to_vec()),
+                StatusSignal::Query,
+                StatusSignal::Progress { state: 1, value: Some(40) },
+                StatusSignal::Notify { title: String::new(), body: "Done; really".into() },
+                StatusSignal::Notify { title: "Build".into(), body: "ok".into() },
+                StatusSignal::Notify { title: String::new(), body: "hi".into() },
+                StatusSignal::CommandEnd(Some(2)),
+                StatusSignal::Prompt,
+                StatusSignal::Reset,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bell_ending_an_osc_is_not_a_bell() {
+        let mut s = Scanner::default();
+        assert!(s.feed(0, b"\x1b]2;title\x07").status.is_empty());
     }
 
     #[test]

@@ -1,13 +1,15 @@
 //! `swarmctl`: list, create, attach to and manage swarm-term sessions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use swarm_client::{resolve, Attachment, Client, StreamEvent};
-use swarm_proto::{now_ms, AttachMode, CreateOpts, MetaUpdate, SessionInfo, SessionState, Size};
+use swarm_proto::{
+    now_ms, AttachMode, CreateOpts, MetaUpdate, ProgramStatus, SessionInfo, SessionState, Size, StatusRecord, StatusState,
+};
 use tokio::sync::mpsc;
 
 /// Ctrl-\ detaches, as in dtach.
@@ -117,7 +119,26 @@ enum Cmd {
         /// Give up after this long (like 90s, 10m, 2h) and exit 1.
         #[arg(long = "for", value_name = "DURATION", value_parser = parse_duration)]
         wait_for: Option<Duration>,
+        /// Instead, wait until the program reports one of these states
+        /// (working, blocked, done, error, idle), and exit 0. Exits with the
+        /// program's status if it ends first.
+        #[arg(long, value_delimiter = ',', value_parser = parse_state)]
+        until: Vec<StatusState>,
     },
+    /// What programs report about themselves: working, blocked (waiting for
+    /// you), done or error, with a message. Every session, or one with -s.
+    Status {
+        /// Session id, id prefix or name.
+        #[arg(short, long)]
+        session: Option<String>,
+        /// Mark the session seen: drop its done and error reports and its
+        /// last notification.
+        #[arg(long, requires = "session")]
+        clear: bool,
+    },
+    /// Print changes as they happen: sessions created, exited, renamed or
+    /// removed, clients attaching, program status, bells and notifications.
+    Events,
     /// Print a session's output: everything still kept, including what was
     /// spilled to disk (`swarmd spill on`), oldest first.
     Dump {
@@ -246,7 +267,14 @@ async fn run(cli: Cli) -> Result<i32> {
             if json {
                 print_json(&sessions)?;
             } else {
-                print_table(&sessions);
+                // A daemon from before program status drops the connection
+                // on this request; it's the last one, so that's harmless.
+                let statuses: HashMap<String, ProgramStatus> = if client.daemon().version == swarm_client::swarm_proto::VERSION {
+                    client.status().await.map(|v| v.into_iter().collect()).unwrap_or_default()
+                } else {
+                    HashMap::new()
+                };
+                print_table(&sessions, &statuses);
             }
             Ok(0)
         }
@@ -400,13 +428,44 @@ async fn run(cli: Cli) -> Result<i32> {
             out.flush()?;
             Ok(0)
         }
-        Cmd::Wait {
-            target: t,
-            wait_for,
-        } => {
+        Cmd::Wait { target: t, wait_for, until } => {
             let s = target(&client, t.session, remote).await?;
-            wait_and_report(&client, &s.id, wait_for, json).await
+            if until.is_empty() {
+                wait_and_report(&client, &s.id, wait_for, json).await
+            } else {
+                wait_for_state(&client, &s.id, &until, wait_for, json).await.map_err(|e| older_daemon(&client, e))
+            }
         }
+        Cmd::Status { session, clear } => {
+            let statuses = client.status().await.map_err(|e| older_daemon(&client, e))?;
+            let sessions = client.list().await?;
+            if let Some(q) = session {
+                let s = resolve(&sessions, &q).map_err(|e| Exit(EXIT_NOT_FOUND, format!("{e:#}")))?;
+                if clear {
+                    client.clear_status(&s.id).await?;
+                    return Ok(0);
+                }
+                let status = statuses.into_iter().find(|(id, _)| *id == s.id).map(|(_, st)| st).unwrap_or_default();
+                if json {
+                    print_json(&serde_json::json!({ "id": s.id, "name": s.display_name(), "status": status }))?;
+                } else {
+                    print_status(s, &status);
+                }
+            } else if json {
+                let all: Vec<_> = statuses
+                    .iter()
+                    .filter_map(|(id, st)| {
+                        let s = sessions.iter().find(|s| s.id == *id)?;
+                        Some(serde_json::json!({ "id": id, "name": s.display_name(), "status": st }))
+                    })
+                    .collect();
+                print_json(&all)?;
+            } else {
+                print_status_table(&sessions, &statuses);
+            }
+            Ok(0)
+        }
+        Cmd::Events => events(&client, json).await.map_err(|e| older_daemon(&client, e)),
         Cmd::Dump { session, raw } => {
             let s = find(&client, &session).await?;
             let mut att = client.attach(&s.id, AttachMode::History, None, true).await?;
@@ -687,6 +746,278 @@ async fn wait_and_report(
     Ok(status)
 }
 
+fn parse_state(s: &str) -> Result<StatusState, String> {
+    Ok(match s.trim() {
+        "idle" => StatusState::Idle,
+        "working" => StatusState::Working,
+        "done" => StatusState::Done,
+        "error" => StatusState::Error,
+        "blocked" => StatusState::Blocked,
+        other => return Err(format!("unknown state {other:?} (working, blocked, done, error, idle)")),
+    })
+}
+
+/// Waits until the session's headline status is one of `states`; exits 0,
+/// or with the program's status if it ends first.
+async fn wait_for_state(
+    client: &Client,
+    id: &str,
+    states: &[StatusState],
+    limit: Option<Duration>,
+    json: bool,
+) -> Result<i32> {
+    use tokio::sync::broadcast::error::RecvError;
+    let mut changes = client.subscribe_status().await?;
+    let mut events = client.subscribe().await?;
+    let reached = |st: &ProgramStatus| st.headline().filter(|r| states.contains(&r.state)).cloned();
+    let report = |r: &StatusRecord| -> Result<i32> {
+        if json {
+            print_json(&serde_json::json!({ "id": id, "state": r.state.as_str(), "record": r }))?;
+        }
+        Ok(0)
+    };
+    let current = client.status().await?;
+    if let Some(r) = current.iter().find(|(sid, _)| sid == id).and_then(|(_, st)| reached(st)) {
+        return report(&r);
+    }
+    if let Some(done) = client.list().await?.iter().find(|s| s.id == id).and_then(|s| exit_status(&s.state)) {
+        return Ok(done.0);
+    }
+    let watch = async {
+        loop {
+            tokio::select! {
+                change = changes.recv() => match change {
+                    Ok((sid, st)) if sid == id => {
+                        if let Some(r) = reached(&st) {
+                            return report(&r);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(RecvError::Lagged(_)) => {
+                        if let Some(r) = client.status().await?.iter().find(|(sid, _)| sid == id).and_then(|(_, st)| reached(st)) {
+                            return report(&r);
+                        }
+                    }
+                    Err(RecvError::Closed) => bail!("connection to daemon lost"),
+                },
+                ev = events.recv() => match ev {
+                    Ok(swarm_proto::SessionEvent::Updated(s)) if s.id == id => {
+                        if let Some(done) = exit_status(&s.state) {
+                            return Ok(done.0);
+                        }
+                    }
+                    Ok(swarm_proto::SessionEvent::Removed { id: gone }) if gone == id => bail!("the session was removed"),
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => bail!("connection to daemon lost"),
+                },
+            }
+        }
+    };
+    match limit {
+        Some(d) => tokio::time::timeout(d, watch).await.map_err(|_| anyhow::anyhow!("timed out"))?,
+        None => watch.await,
+    }
+}
+
+/// `blocked (permission): Apply 3 changes?`, `working 40%: Building`.
+fn record_text(r: &StatusRecord) -> String {
+    let mut text = r.state.as_str().to_string();
+    if let Some(k) = r.kind {
+        text.push_str(&format!(" ({})", k.as_str()));
+    }
+    if let Some(p) = r.progress {
+        text.push_str(&format!(" {p}%"));
+    }
+    if let Some(m) = r.msg.as_deref().or(r.title.as_deref()) {
+        text.push_str(": ");
+        text.push_str(m);
+    }
+    text
+}
+
+/// `now` or `5m ago`.
+fn when(ms: u64) -> String {
+    match ago(ms) {
+        now if now == "now" => now,
+        t => format!("{t} ago"),
+    }
+}
+
+fn print_status_table(sessions: &[SessionInfo], statuses: &[(String, ProgramStatus)]) {
+    if sessions.is_empty() {
+        println!("No sessions.");
+        return;
+    }
+    println!("{:<10}  {:<20}  {:<12}  STATUS", "ID", "NAME", "APP");
+    for s in sessions {
+        let st = statuses.iter().find(|(id, _)| *id == s.id).map(|(_, st)| st);
+        let (app, text) = match st.and_then(|st| st.headline().map(|r| (st, r))) {
+            Some((st, r)) => (st.app_of(r).unwrap_or("-").to_string(), record_text(r)),
+            None => match st.and_then(|st| st.notification.as_ref()) {
+                Some(n) => ("-".to_string(), format!("notified: {}", if n.body.is_empty() { &n.title } else { &n.body })),
+                None => ("-".to_string(), "-".to_string()),
+            },
+        };
+        let id: String = s.id.chars().take(10).collect();
+        let name: String = s.display_name().chars().take(20).collect();
+        let app: String = app.chars().take(12).collect();
+        println!("{id:<10}  {name:<20}  {app:<12}  {text}");
+    }
+}
+
+fn print_status(s: &SessionInfo, st: &ProgramStatus) {
+    println!("session     {} ({})", s.display_name(), s.id);
+    if st.records.is_empty() {
+        println!("status      - (nothing reported)");
+    }
+    for r in &st.records {
+        let id = if r.id.is_empty() { "(program)" } else { r.id.as_str() };
+        let app = st.app_of(r).map(|a| format!(" [{a}]")).unwrap_or_default();
+        println!("status      {id}{app}  {}  ({})", record_text(r), when(r.updated_ms));
+    }
+    if let Some(n) = &st.notification {
+        println!("notified    {}{}  ({})", n.title, if n.title.is_empty() { n.body.clone() } else { format!(": {}", n.body) }, when(n.at_ms));
+    }
+    if st.bells > 0 {
+        println!("bells       {} (last {})", st.bells, when(st.bell_ms));
+    }
+    if let Some((code, at)) = st.last_exit {
+        println!("last exit   {code} ({})", when(at));
+    }
+}
+
+/// Streams changes, as text lines or one JSON object per line.
+async fn events(client: &Client, json: bool) -> Result<i32> {
+    use tokio::sync::broadcast::error::RecvError;
+    // Asked first: a daemon too old for status fails here, not mid-stream.
+    let mut statuses: HashMap<String, ProgramStatus> = client.status().await?.into_iter().collect();
+    let mut changes = client.subscribe_status().await?;
+    let mut events = client.subscribe().await?;
+    let mut infos: HashMap<String, SessionInfo> = client.list().await?.into_iter().map(|s| (s.id.clone(), s)).collect();
+    let out = |kind: &str, id: &str, name: &str, text: String, fields: serde_json::Value| -> Result<()> {
+        if json {
+            let mut v = serde_json::json!({ "type": kind, "id": id, "name": name, "at_ms": now_ms() });
+            if let (Some(obj), serde_json::Value::Object(extra)) = (v.as_object_mut(), fields) {
+                obj.extend(extra);
+            }
+            println!("{}", serde_json::to_string(&v)?);
+        } else {
+            let secs = now_ms() / 1000;
+            let local = time_of_day(secs);
+            let short: String = id.chars().take(10).collect();
+            println!("{local}  {kind:<12}  {short}  {name}{}", if text.is_empty() { String::new() } else { format!("  {text}") });
+        }
+        std::io::stdout().flush()?;
+        Ok(())
+    };
+    loop {
+        tokio::select! {
+            ev = events.recv() => match ev {
+                Ok(swarm_proto::SessionEvent::Created(s)) => {
+                    out("created", &s.id, s.display_name(), s.command.join(" "), serde_json::json!({ "command": s.command }))?;
+                    infos.insert(s.id.clone(), s);
+                }
+                Ok(swarm_proto::SessionEvent::Updated(s)) => {
+                    if let Some(old) = infos.get(&s.id) {
+                        session_changes(old, &s, &out)?;
+                    }
+                    infos.insert(s.id.clone(), s);
+                }
+                Ok(swarm_proto::SessionEvent::Removed { id }) => {
+                    let name = infos.remove(&id).map(|s| s.display_name().to_string()).unwrap_or_default();
+                    statuses.remove(&id);
+                    out("removed", &id, &name, String::new(), serde_json::json!({}))?;
+                }
+                Err(RecvError::Lagged(_)) => {
+                    infos = client.list().await?.into_iter().map(|s| (s.id.clone(), s)).collect();
+                }
+                Err(RecvError::Closed) => bail!("connection to daemon lost"),
+            },
+            change = changes.recv() => match change {
+                Ok((id, st)) => {
+                    let name = infos.get(&id).map(|s| s.display_name().to_string()).unwrap_or_default();
+                    let old = statuses.insert(id.clone(), st.clone()).unwrap_or_default();
+                    status_changes(&id, &name, &old, &st, &out)?;
+                }
+                Err(RecvError::Lagged(_)) => {
+                    statuses = client.status().await?.into_iter().collect();
+                }
+                Err(RecvError::Closed) => bail!("connection to daemon lost"),
+            },
+        }
+    }
+}
+
+type Emit<'a> = dyn Fn(&str, &str, &str, String, serde_json::Value) -> Result<()> + 'a;
+
+fn session_changes(old: &SessionInfo, new: &SessionInfo, out: &Emit) -> Result<()> {
+    let (id, name) = (new.id.as_str(), new.display_name());
+    if let (SessionState::Running, Some((status, code, signal))) = (&old.state, exit_status(&new.state)) {
+        let text = match signal {
+            Some(sig) if code.is_none() => format!("killed by signal {sig}"),
+            _ => format!("exit {status}"),
+        };
+        out("exited", id, name, text, serde_json::json!({ "status": status, "code": code, "signal": signal }))?;
+    }
+    if old.name != new.name {
+        out("renamed", id, name, String::new(), serde_json::json!({ "old": old.name, "new": new.name }))?;
+    }
+    if old.title != new.title {
+        out("title", id, name, new.title.clone(), serde_json::json!({ "title": new.title }))?;
+    }
+    if old.cwd != new.cwd {
+        let cwd = new.cwd.clone().unwrap_or_default();
+        out("cwd", id, name, cwd.clone(), serde_json::json!({ "cwd": cwd }))?;
+    }
+    if old.foreground != new.foreground {
+        let fg = new.foreground.clone().unwrap_or_default();
+        out("foreground", id, name, fg.clone(), serde_json::json!({ "foreground": new.foreground }))?;
+    }
+    for c in new.clients.iter().filter(|c| !old.clients.iter().any(|o| o.client_id == c.client_id)) {
+        out("attached", id, name, c.name.clone(), serde_json::json!({ "client": c.name, "readonly": c.readonly }))?;
+    }
+    for c in old.clients.iter().filter(|c| !new.clients.iter().any(|n| n.client_id == c.client_id)) {
+        out("detached", id, name, c.name.clone(), serde_json::json!({ "client": c.name }))?;
+    }
+    Ok(())
+}
+
+fn status_changes(id: &str, name: &str, old: &ProgramStatus, new: &ProgramStatus, out: &Emit) -> Result<()> {
+    let key = |st: &ProgramStatus| st.headline().map(|r| (r.id.clone(), r.state, r.kind, r.progress, r.msg.clone()));
+    if key(old) != key(new) {
+        match new.headline() {
+            Some(r) => out(
+                "status",
+                id,
+                name,
+                record_text(r),
+                serde_json::json!({ "state": r.state.as_str(), "record": r, "app": new.app_of(r) }),
+            )?,
+            None => out("status", id, name, "-".into(), serde_json::json!({ "state": null }))?,
+        }
+    }
+    if new.bells > old.bells {
+        out("bell", id, name, String::new(), serde_json::json!({ "bells": new.bells }))?;
+    }
+    if let Some(n) = new.notification.as_ref().filter(|n| old.notification.as_ref().map(|o| o.at_ms) != Some(n.at_ms)) {
+        let text = if n.title.is_empty() { n.body.clone() } else { format!("{}: {}", n.title, n.body) };
+        out("notification", id, name, text, serde_json::json!({ "title": n.title, "body": n.body }))?;
+    }
+    if new.last_exit.is_some() && new.last_exit != old.last_exit {
+        let code = new.last_exit.map(|(c, _)| c);
+        out("command", id, name, format!("exit {}", code.unwrap_or_default()), serde_json::json!({ "code": code }))?;
+    }
+    Ok(())
+}
+
+/// `HH:MM:SS` in local time.
+fn time_of_day(secs: u64) -> String {
+    let t = secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&t, &mut tm) };
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
+
 fn terminal_size() -> Size {
     // Some ptys report 0x0 until someone sets a size.
     match crossterm::terminal::size() {
@@ -750,7 +1081,7 @@ fn is_shell(name: &str) -> bool {
     matches!(name, "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "pwsh" | "elvish" | "xonsh")
 }
 
-fn print_table(sessions: &[SessionInfo]) {
+fn print_table(sessions: &[SessionInfo], statuses: &HashMap<String, ProgramStatus>) {
     if sessions.is_empty() {
         println!("No sessions. Start one with `swarmctl new`.");
         return;
@@ -764,7 +1095,10 @@ fn print_table(sessions: &[SessionInfo]) {
             [
                 s.id.chars().take(10).collect(),
                 s.display_name().to_string(),
-                state_text(s),
+                match statuses.get(&s.id).and_then(|st| st.headline()) {
+                    Some(r) if r.state != StatusState::Idle => record_text(r),
+                    _ => state_text(s),
+                },
                 cwd,
                 s.clients.len().to_string(),
                 ago(s.last_output_ms.max(s.last_input_ms)),
