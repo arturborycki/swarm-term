@@ -196,7 +196,11 @@ Request::Subscribe                                      → Ok, then ServerMsg::
 Request::Shutdown                                       → Ok   (daemon exits; sessions keep running)
 Request::Write { id, data }                             → Ok   (typed into the session with no attachment: `swarmctl send`)
 Request::Screen { id }                                  → Screen(ScreenCapture)     (visible rows, wraps, cursor, from the shim's vt100 model: `swarmctl capture`)
+Request::Status                                         → Statuses(Vec<(id, ProgramStatus)>)
+Request::SubscribeStatus                                → Ok, then ServerMsg::Status { id, status } on every change
+Request::ClearStatus { id }                             → Ok   (the user has seen it: done/error records and the notification go)
 ```
+`ProgramStatus` is kept beside `SessionInfo`, not in it: `SessionInfo` is encoded by position in every message and in the in-place update handoff, so a new field would break older apps and daemons. Each shim parses OSC 7501 (the Program Status Protocol), OSC 9;4 progress, OSC 9/777/99 notifications, BEL and OSC 133;D in its scanner (`swarm-shim/src/status.rs`), answers `OSC 7501 ; ?` itself, and serves `ShimRequest::WatchStatus`; swarmd keeps the latest per session and pushes changes only to connections that asked. Status isn't handed over in an in-place shim update: the new program starts with none.
 New variants go at the end of each enum: postcard encodes them by position, and a daemon or shim from an older build closes the connection on a request it can't decode (swarmctl reports that as an older daemon).
 `AttachMode` is `Full` (replay from the oldest buffered boundary), `ResumeFrom(offset)` (falls back to `Full` if no longer buffered) or `Live`.
 

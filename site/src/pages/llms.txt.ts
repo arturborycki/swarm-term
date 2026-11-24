@@ -18,7 +18,7 @@ export const GET: APIRoute = () =>
 - Splits and groups: sessions sit in sidebar groups (This Mac, one per host, your own); any session, local or remote, can be shown beside others in split panes.
 - Remote hosts: uses your ssh config and keys, installs swarmd on the host, reconnects after sleep or network drops.
 - Linux servers can also be set up by hand: static builds of swarmd for x86_64 and aarch64 are at https://swarm-term.com/docs/#server-install; unpack into ~/.local/share/swarm/bin.
-- Command line: swarmctl ls, new, attach, rename, info, dump, kill and rm, locally or with --host <ssh host>. For scripts and agents: swarmctl send, send-key, capture (the screen as text) and wait (exit status), with --json.
+- Command line: swarmctl ls, new, attach, rename, info, dump, kill and rm, locally or with --host <ssh host>. For scripts and agents: swarmctl send, send-key, capture (the screen as text) and wait (exit status), with --json. swarmctl status shows what programs report through the Program Status Protocol (OSC 7501: working, blocked, done, error), bells and notifications; wait --until blocked,done waits for one; swarmctl events streams changes.
 - Scrollback: 16 MB per session in memory, optionally more on disk, encrypted.
 - License: the app (a Warp fork) is AGPL-3.0; the daemon crates are MIT or Apache-2.0.
 - Source: ${REPO} (daemon, swarmctl, site) and ${APP_REPO} (the app).

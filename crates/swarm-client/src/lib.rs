@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use swarm_proto::{
     paths, read_frame, write_frame, AttachMode, ClientMsg, CreateOpts, MetaUpdate, Request, Response, ServerMsg,
-    SessionEvent, SessionInfo, Size, StreamId, PROTOCOL_VERSION,
+    ProgramStatus, SessionEvent, SessionId, SessionInfo, Size, StreamId, PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
@@ -76,8 +76,10 @@ struct Shared {
     pending: Mutex<Pending>,
     streams: Mutex<HashMap<StreamId, StreamTx>>,
     events: broadcast::Sender<SessionEvent>,
+    status_events: broadcast::Sender<(SessionId, ProgramStatus)>,
     next_id: AtomicU64,
     subscribed: tokio::sync::Mutex<bool>,
+    status_subscribed: tokio::sync::Mutex<bool>,
     /// Set by [`Client::close`]: the connection is being dropped.
     closed: watch::Sender<bool>,
 }
@@ -175,8 +177,10 @@ impl Client {
             pending: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
             events,
+            status_events: broadcast::channel(1024).0,
             next_id: AtomicU64::new(1),
             subscribed: tokio::sync::Mutex::new(false),
+            status_subscribed: tokio::sync::Mutex::new(false),
             closed: watch::channel(false).0,
         });
 
@@ -230,6 +234,9 @@ impl Client {
                     }
                     ServerMsg::Event(ev) => {
                         let _ = s.events.send(ev);
+                    }
+                    ServerMsg::Status { id, status } => {
+                        let _ = s.status_events.send((id, status));
                     }
                     ServerMsg::Welcome { .. } => {}
                 }
@@ -355,6 +362,36 @@ impl Client {
         let mut subscribed = self.shared.subscribed.lock().await;
         if !*subscribed {
             self.request(Request::Subscribe).await?;
+            *subscribed = true;
+        }
+        Ok(rx)
+    }
+
+    /// What the programs in every session report about themselves (an empty
+    /// status for sessions that reported nothing).
+    pub async fn status(&self) -> Result<Vec<(SessionId, ProgramStatus)>> {
+        match self.request(Request::Status).await? {
+            Response::Statuses(s) => Ok(s),
+            other => bail!("unexpected {other:?}"),
+        }
+    }
+
+    /// The user has seen the session: drop its `done` and `error` records
+    /// and its last notification.
+    pub async fn clear_status(&self, id: &str) -> Result<()> {
+        match self.request(Request::ClearStatus { id: id.into() }).await? {
+            Response::Ok => Ok(()),
+            other => bail!("unexpected {other:?}"),
+        }
+    }
+
+    /// Status changes from now on. A daemon from before program status drops
+    /// the connection on this request, so check `status()` first.
+    pub async fn subscribe_status(&self) -> Result<broadcast::Receiver<(SessionId, ProgramStatus)>> {
+        let rx = self.shared.status_events.subscribe();
+        let mut subscribed = self.shared.status_subscribed.lock().await;
+        if !*subscribed {
+            self.request(Request::SubscribeStatus).await?;
             *subscribed = true;
         }
         Ok(rx)

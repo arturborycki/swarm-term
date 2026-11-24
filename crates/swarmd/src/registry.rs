@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use swarm_proto::{
-    paths, read_frame, write_frame, AttachMode, ClientDesc, CreateOpts, MetaUpdate, ScreenCapture, SessionEvent,
-    SessionId, SessionInfo, ShimMsg, ShimRequest, ShimUpgrade, ShimUpgradeOutcome, Size,
+    paths, read_frame, write_frame, AttachMode, ClientDesc, CreateOpts, MetaUpdate, ProgramStatus, ScreenCapture,
+    SessionEvent, SessionId, SessionInfo, ShimMsg, ShimRequest, ShimUpgrade, ShimUpgradeOutcome, Size,
 };
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
@@ -65,6 +65,10 @@ pub struct Registry {
     shim_build: Option<String>,
     sessions: Mutex<HashMap<SessionId, SessionInfo>>,
     events: broadcast::Sender<SessionEvent>,
+    /// What each session's programs report about themselves, as its shim
+    /// last said, and changes to it.
+    statuses: Mutex<HashMap<SessionId, ProgramStatus>>,
+    status_events: broadcast::Sender<(SessionId, ProgramStatus)>,
     /// Sessions whose shim is being updated in place: relays hold input
     /// until it's done, so no keystroke is lost in the switch.
     paused: Mutex<std::collections::HashSet<SessionId>>,
@@ -102,6 +106,8 @@ impl Registry {
             shim_build,
             sessions: Mutex::new(HashMap::new()),
             events,
+            statuses: Mutex::new(HashMap::new()),
+            status_events: broadcast::channel(1024).0,
             paused: Mutex::new(Default::default()),
             unpaused: tokio::sync::Notify::new(),
             retries: Mutex::new(HashMap::new()),
@@ -132,6 +138,60 @@ impl Registry {
 
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.events.subscribe()
+    }
+
+    pub fn subscribe_status(&self) -> broadcast::Receiver<(SessionId, ProgramStatus)> {
+        self.status_events.subscribe()
+    }
+
+    /// Every session's program status (empty for sessions that reported none).
+    pub fn statuses(&self) -> Vec<(SessionId, ProgramStatus)> {
+        let statuses = self.statuses.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ids: Vec<SessionId> =
+            self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).keys().cloned().collect();
+        ids.sort();
+        ids.into_iter()
+            .map(|id| {
+                let status = statuses.get(&id).cloned().unwrap_or_default();
+                (id, status)
+            })
+            .collect()
+    }
+
+    pub async fn clear_status(&self, id: &str) -> Result<()> {
+        self.simple(id, ShimRequest::ClearStatus).await
+    }
+
+    /// Follows a session's program status for as long as the session is
+    /// here. The watch ends when the shim is updated in place (and is
+    /// opened again) or when a shim too old to report status closes it
+    /// (tried again now and then: the daemon updates shims as it starts).
+    fn watch_status(self: &Arc<Self>, id: SessionId) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let mut delay = Duration::from_millis(250);
+            loop {
+                if !this.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(&id) {
+                    break;
+                }
+                if let Ok(mut stream) = UnixStream::connect(paths::shim_socket(&this.runtime, &id)).await {
+                    if write_frame(&mut stream, &ShimRequest::WatchStatus).await.is_ok() {
+                        while let Ok(Some(ShimMsg::Status(status))) = read_frame::<_, ShimMsg>(&mut stream).await {
+                            delay = Duration::from_millis(250);
+                            let mut statuses = this.statuses.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if statuses.get(&id) != Some(&status) {
+                                statuses.insert(id.clone(), status.clone());
+                                drop(statuses);
+                                let _ = this.status_events.send((id.clone(), status));
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(30));
+            }
+            this.statuses.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&id);
+        });
     }
 
     /// Re-adopts every shim still running from a previous daemon, all at once
@@ -272,6 +332,7 @@ impl Registry {
         }
         let _ = self.events.send(SessionEvent::Created(info.clone()));
         let adopted = info.clone();
+        self.watch_status(id.to_string());
 
         let this = self.clone();
         let id = id.to_string();

@@ -82,6 +82,30 @@ async fn handle(
             write_frame(&mut wr, &reply).await
         }
         ShimRequest::Screen => write_frame(&mut wr, &ShimMsg::Screen(session.capture())).await,
+        ShimRequest::Status => write_frame(&mut wr, &ShimMsg::Status(session.program_status())).await,
+        ShimRequest::ClearStatus => {
+            session.clear_status();
+            write_frame(&mut wr, &ShimMsg::Ok).await
+        }
+        ShimRequest::WatchStatus => {
+            let mut rx = session.watch_status();
+            let current = rx.borrow_and_update().clone();
+            write_frame(&mut wr, &ShimMsg::Status(current)).await?;
+            let mut probe = [0u8; 1];
+            loop {
+                tokio::select! {
+                    changed = rx.changed() => {
+                        if changed.is_err() {
+                            return Ok(());
+                        }
+                        let status = rx.borrow_and_update().clone();
+                        write_frame(&mut wr, &ShimMsg::Status(status)).await?;
+                    }
+                    // The watcher never sends anything; a read completes when it goes away.
+                    _ = tokio::io::AsyncReadExt::read(&mut rd, &mut probe) => return Ok(()),
+                }
+            }
+        }
         ShimRequest::Version => {
             let reply = ShimMsg::Version {
                 build_id: swarm_proto::BUILD_ID.to_string(),
