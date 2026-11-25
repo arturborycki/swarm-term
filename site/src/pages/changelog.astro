@@ -4,6 +4,18 @@ import { REPO, REPO_PUBLIC } from '../site';
 
 const releases = [
   {
+    version: '0.1.9',
+    date: '2026-11-24',
+    href: `${REPO}/releases/tag/v0.1.9`,
+    items: [
+      'Sessions show what their programs report: a hand when a program such as an AI agent needs your approval or an answer, a check when it finished, the alert when it failed, and its message under the name. Programs report this with the open Program Status Protocol (OSC 7501); bells, progress and desktop notifications from programs count too.',
+      'A background session that needs you, finishes or fails sends a notification, and sessions waiting for you are counted on the Dock icon. Notifications are on from the first one; macOS asks for permission once.',
+      'Session menu: Mark as Unread (⌥⌘U), Mute or Unmute Session, Navigate Back and Forward between the sessions you were in (⌃⌘[ and ⌃⌘]), Balance Splits, Move Pane to New Tab and Close Other Panes. Filter Sessions… (⌥⌘F) finds sessions by name, host or state, such as "needs you".',
+      'swarmctl drives sessions from scripts and coding agents without attaching: send, send-key, capture (the screen as text) and wait (exit status), plus status, wait --until blocked,done, events, and --json everywhere.',
+      'Sessions keep running when Swarm is force quit: the daemon now runs as its own background job instead of inside the app.',
+    ],
+  },
+  {
     version: '0.1.8',
     date: '2026-11-17',
     href: `${REPO}/releases/tag/v0.1.8`,
