@@ -401,7 +401,23 @@ async fn start() -> Result<bool> {
     let log_dir = paths::log_dir();
     paths::ensure_private_dir(&log_dir)?;
     let log = paths::open_private_append(&log_dir.join("swarmd.log"))?;
-    let mut cmd = std::process::Command::new(std::env::current_exe()?);
+    let exe = std::env::current_exe()?;
+    // Not as our child: an app that runs `swarmd start` takes its children,
+    // and their children, with it when it quits (see `service`).
+    #[cfg(target_os = "macos")]
+    match service::start_app_job(&exe) {
+        Ok(()) => {
+            for _ in 0..500 {
+                if connect().await.is_ok() {
+                    return Ok(true);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            bail!("swarmd did not start within 5s; see {}", log_dir.join("swarmd.log").display())
+        }
+        Err(e) => eprintln!("swarmd: couldn't start the daemon through launchd ({e:#}); starting it directly"),
+    }
+    let mut cmd = std::process::Command::new(exe);
     cmd.arg("run").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(log));
     unsafe {
         cmd.pre_exec(|| {
