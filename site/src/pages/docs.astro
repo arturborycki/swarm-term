@@ -5,6 +5,7 @@ import { DMG, LINUX_SHA256_AARCH64, LINUX_SHA256_X86_64, VERSION, linuxTarball }
 const toc = [
   ['install', 'Install'],
   ['sessions', 'Sessions and tabs'],
+  ['navigate', 'Get around'],
   ['remote', 'Remote hosts'],
   ['server-install', 'Install on a server yourself'],
   ['scrollback', 'Scrollback'],
@@ -68,6 +69,44 @@ const toc = [
         remote, can share one window, and they keep running as they move. Drag the dividers to resize.
       </p>
 
+      <h2 id="navigate">Get around</h2>
+      <p>
+        <strong>Go to Anything</strong> (⌘P, or File → Go to Anything…) finds whatever you type among open tabs,
+        detached sessions and hosts. Sessions whose program reports something come first, with its message ("Needs you:
+        Run npm install?"), so typing <em>needs you</em> takes you to the session that is waiting. It also offers a new
+        session in each folder your sessions use, on each host, or in a folder path you type. The command palette is on
+        ⇧⌘P.
+      </p>
+      <ul>
+        <li>
+          <strong>Activity</strong> (⌘., or the ACTIVITY toggle at the top of the sidebar) narrows the sidebar to
+          sessions that need you, finished, failed, report work or have unread output, and sums them up in its header.
+        </li>
+        <li>
+          <strong>Filter Sessions…</strong> (⌥⌘F) finds sessions by name, host or state, such as "needs you", "finished"
+          or "muted". <strong>Navigate Back</strong> and <strong>Forward</strong> (⌃⌘[ and ⌃⌘]) step through the sessions
+          you were in.
+        </li>
+        <li>
+          <strong>Scratch Terminal</strong> (⌥⌘T, or View → Scratch Terminal) shows or hides a floating terminal over
+          every window. Drag it by its top edge to move it. Its tabs are sessions like any others, so they keep running
+          while it's hidden; Settings → Features sets its position and size.
+        </li>
+        <li>
+          <strong>Copy Mode</strong> (⇧⌘X) puts a cursor in the scrollback: move with hjkl or the arrows, start a
+          selection with v, copy with y or Return, leave with Esc.
+        </li>
+        <li>
+          <strong>Insert Path…</strong> (⇧⌘I) types the paths of files or folders you choose into the session.{' '}
+          <strong>Quick Look Selection</strong> (⇧⌘Y) previews a selected path, or opens a selected link in the browser.
+        </li>
+      </ul>
+      <p>
+        A background session that needs you, finishes or fails sends a notification, and sessions waiting for you are
+        counted on the Dock icon. <strong>Mark as Unread</strong> (⌥⌘U) keeps a session flagged until you open it again;{' '}
+        <strong>Mute Session</strong> silences one session.
+      </p>
+
       <h2 id="remote">Remote hosts</h2>
       <p>
         Click <strong>Connect…</strong> in the sidebar and pick a host from your <code>~/.ssh/config</code>, or type{' '}
@@ -92,6 +131,20 @@ const toc = [
         <code>loginctl enable-linger</code> on the host once. Many servers (Ubuntu, for one) let only an administrator
         do this over ssh: if you get “Access denied”, ask one to run{' '}
         <code>sudo loginctl enable-linger &lt;your user&gt;</code>.
+      </p>
+      <h3 id="ports">Ports and forwarding</h3>
+      <p>
+        When a program in a session listens on a port, such as a development server on 3000, Go to Anything (⌘P) lists
+        it. On this Mac, <strong>Open localhost:3000</strong> opens it in your browser. On a remote host,{' '}
+        <strong>Open port 3000 from &lt;session&gt;</strong> forwards the port to this Mac over ssh first, then opens{' '}
+        <code>http://localhost:3000</code> (or another local port if 3000 is taken).
+      </p>
+      <p>
+        To forward a port before anything listens on it, type the number in Go to Anything (<code>3000</code>,{' '}
+        <code>:3000</code> or <code>port 3000</code>) and choose <strong>Forward port 3000 from &lt;host&gt;</strong>.
+        Forwards use your own ssh config and keys. If nothing answers on the host yet, Swarm says so and keeps the forward
+        open, so you can start the server and reload. Running forwards are listed in Go to Anything as{' '}
+        <strong>Stop forwarding</strong>, and they end when Swarm quits.
       </p>
 
       <h2 id="server-install">Install on a server yourself</h2>
@@ -174,7 +227,7 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
         </tbody>
       </table>
       <p>
-        <code>ls</code>, <code>info</code>, <code>new -d</code>, <code>capture</code> and <code>wait</code> print JSON with
+        <code>ls</code>, <code>info</code>, <code>new -d</code>, <code>capture</code> and <code>wait</code> print JSON with{' '}
         <code>--json</code>. Exit statuses: 0 done, 1 failed (or <code>wait</code> timed out), 2 bad command line, 3 no
         such session or more than one matches, 4 the daemon couldn't be reached; <code>wait</code> exits with the
         program's own status.
@@ -184,8 +237,7 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
 
       <h3 id="program-status">Program status</h3>
       <p>
-        Programs can tell Swarm what they're doing with the open
-        <a href="https://www.superlogical.com/rex/docs/build/program-status">Program Status Protocol</a> (OSC 7501):
+        Programs can tell Swarm what they're doing with the open Program Status Protocol (OSC 7501):
         working, blocked on you (for a permission, an answer or a login), done or failed, with a one-line message. Swarm
         also counts bells, keeps the last desktop notification a program asked for (OSC 9, 777 and 99), reads progress
         (OSC 9;4) and the exit code of each command your shell reports (OSC 133). A new prompt or the program exiting
@@ -203,8 +255,8 @@ rsync -a ~/Photos backup:/photos &amp;&amp; status done "Photos synced" || statu
       </p>
       <pre class="term"><span class="p">$</span> swarmctl daemon install-service</pre>
       <p>
-        <code>swarmctl daemon uninstall-service</code> goes back to starting on demand. <code>swarmctl daemon stop</code>
-        stops the daemon without ending any session. When a new version starts, running sessions move to it in place;
+        <code>swarmctl daemon uninstall-service</code> goes back to starting on demand. <code>swarmctl daemon stop</code>{' '}
+        stops the daemon without ending any session. When a new version starts, running sessions move to it in place;{' '}
         <code>swarmctl daemon upgrade-shims</code> does that by hand.
       </p>
 
