@@ -11,7 +11,8 @@ output.
 **Download:** [swarm-term.com](https://swarm-term.com) or
 [Releases](https://github.com/arturborycki/swarm-term/releases). macOS 13
 Ventura or later, universal (Apple silicon and Intel), signed and notarized
-by Apple. Swarm installs its own updates. Or with Homebrew:
+by Apple. Swarm installs its own updates, and can download and install them
+in the background (Settings → About). Or with Homebrew:
 
 ```bash
 brew install --cask arturborycki/swarm/swarm
