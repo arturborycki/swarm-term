@@ -41,6 +41,12 @@ const toc = [
         and offers <strong>Install and Restart</strong>. It installs only downloads signed with Swarm's release key, and
         your sessions keep running through the restart.
       </p>
+      <p>
+        In Settings → About, <strong>Download updates in the background</strong> has Swarm download a new version first and
+        then offer to restart into it; if you choose <strong>Later</strong>, quitting Swarm installs it. With{' '}
+        <strong>Install updates while Swarm isn't in use</strong> also on, Swarm installs it once you've been in another
+        app for a minute and reopens in the background.
+      </p>
       <p>If you installed from the DMG, link <code>swarmctl</code> onto your <code>PATH</code>:</p>
       <pre class="term">ln -s /Applications/Swarm.app/Contents/MacOS/swarmctl /usr/local/bin/swarmctl</pre>
 
@@ -261,7 +267,12 @@ rsync -a ~/Photos backup:/photos &amp;&amp; status done "Photos synced" || statu
       </p>
 
       <h2 id="troubleshooting">Troubleshooting</h2>
-      <p>Something not covered here? <a href="/report/">Report an issue</a> and we'll reply by email.</p>
+      <p>
+        Something not covered here? <a href="/report/">Report an issue</a> and we'll reply by email. To include the
+        details that help most, choose <strong>Help → Copy Debug Info</strong> and paste the result: Swarm's version,
+        its update settings and the state of the daemon on this Mac and on each connected host, with your home folder
+        shown as <code>~</code>.
+      </p>
       <dl>
         <dt>macOS says Swarm can't be opened</dt>
         <dd>Versions before 0.1.2 aren't notarized: allow them once in System Settings → Privacy &amp; Security → Open Anyway, or install the current version.</dd>
