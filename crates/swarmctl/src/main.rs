@@ -12,6 +12,8 @@ use swarm_proto::{
 };
 use tokio::sync::mpsc;
 
+mod agents;
+
 /// Ctrl-\ detaches, as in dtach.
 const DETACH_KEY: u8 = 0x1c;
 /// For this long after replayed output, terminal responses in the input are
@@ -159,6 +161,30 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
+    /// Have coding agents (Claude Code, Codex) show in Swarm when they're working, waiting for
+    /// you or done.
+    Agents {
+        #[command(subcommand)]
+        cmd: AgentsCmd,
+    },
+    /// Run by a coding agent's hook: reports the agent's event to the session it runs in.
+    #[command(hide = true)]
+    AgentHook {
+        /// claude or codex.
+        agent: String,
+        /// The event as JSON (Codex passes it here; Claude Code on standard input).
+        event: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Clone, Copy)]
+enum AgentsCmd {
+    /// Add hooks to Claude Code and a notify program to Codex (the files are backed up first).
+    Install,
+    /// Remove them again.
+    Uninstall,
+    /// Show whether each agent reports to Swarm.
+    Status,
 }
 
 /// The session a command acts on: `-s`, or else the session it runs in.
@@ -215,6 +241,11 @@ impl std::error::Error for Exit {}
 
 fn main() {
     let cli = Cli::parse();
+    // Runs on every agent event: no runtime and no daemon connection.
+    if let Some(Cmd::AgentHook { agent, event }) = &cli.cmd {
+        agents::run_hook(agent, event.as_deref());
+        return;
+    }
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     let code = match rt.block_on(run(cli)) {
         Ok(code) => code,
@@ -253,6 +284,42 @@ fn older_daemon(client: &Client, e: anyhow::Error) -> anyhow::Error {
     e
 }
 
+/// `swarmctl agents …`, here or, with `--host`, by the host's own swarmctl over ssh.
+async fn agents_cmd(host: &Option<String>, cmd: AgentsCmd, json: bool) -> Result<i32> {
+    let sub = match cmd {
+        AgentsCmd::Install => "install",
+        AgentsCmd::Uninstall => "uninstall",
+        AgentsCmd::Status => "status",
+    };
+    if let Some(host) = host {
+        let remote = format!(
+            "bin=\"$HOME/.local/share/swarm/bin/swarmctl\"; [ -x \"$bin\" ] || bin=swarmctl; exec \"$bin\" agents {sub}{}",
+            if json { " --json" } else { "" }
+        );
+        let status = tokio::process::Command::new("ssh").arg(host).arg(remote).status().await.context("run ssh")?;
+        return Ok(status.code().unwrap_or(1));
+    }
+    let paths = agents::Paths::from_home()?;
+    let outcome = match cmd {
+        AgentsCmd::Install => {
+            let exe = std::env::current_exe().context("find this swarmctl")?;
+            agents::install(&paths, &exe.canonicalize().unwrap_or(exe))?
+        }
+        AgentsCmd::Uninstall => agents::uninstall(&paths)?,
+        AgentsCmd::Status => agents::status(&paths)?,
+    };
+    if json {
+        let map: serde_json::Map<String, serde_json::Value> =
+            outcome.into_iter().map(|(agent, what)| (agent.to_string(), what.into())).collect();
+        println!("{}", serde_json::Value::Object(map));
+    } else {
+        for (agent, what) in outcome {
+            println!("{agent}: {what}");
+        }
+    }
+    Ok(0)
+}
+
 async fn run(cli: Cli) -> Result<i32> {
     let cmd = cli.cmd.unwrap_or(Cmd::Ls);
     let remote = cli.host.is_some();
@@ -265,6 +332,9 @@ async fn run(cli: Cli) -> Result<i32> {
             _ => "service status",
         };
         return service(&cli.host, args).await;
+    }
+    if let Cmd::Agents { cmd } = cmd {
+        return agents_cmd(&cli.host, cmd, cli.json).await;
     }
     let client = connect(&cli.host).await?;
     let json = cli.json;
@@ -542,6 +612,8 @@ async fn run(cli: Cli) -> Result<i32> {
             let _ = att.detach().await;
             Ok(0)
         }
+        // Handled before connecting.
+        Cmd::Agents { .. } | Cmd::AgentHook { .. } => Ok(0),
         Cmd::Daemon { cmd } => match cmd {
             DaemonCmd::Status | DaemonCmd::Start => {
                 client.ping().await?;

@@ -74,6 +74,15 @@ const toc = [
         will take, and dropping near the outer edge takes that whole side. Sessions from different groups, local and
         remote, can share one window, and they keep running as they move. Drag the dividers to resize.
       </p>
+      <p>
+        The Session menu also moves panes and tabs around: <strong>Move Pane to New Tab</strong>,{' '}
+        <strong>Move Pane to Tab…</strong> (choose the tab in Go to Anything), <strong>Move Pane to New Window</strong>{' '}
+        and <strong>Move Tab to New Window</strong>.
+      </p>
+      <p>
+        <strong>View → Import Theme…</strong> turns an iTerm2 color preset (<code>.itermcolors</code>) or a Ghostty theme
+        file into a Swarm theme and switches to it.
+      </p>
 
       <h2 id="navigate">Get around</h2>
       <p>
@@ -99,8 +108,10 @@ const toc = [
           while it's hidden; Settings → Features sets its position and size.
         </li>
         <li>
-          <strong>Copy Mode</strong> (⇧⌘X) puts a cursor in the scrollback: move with hjkl or the arrows, start a
-          selection with v, copy with y or Return, leave with Esc.
+          <strong>Copy Mode</strong> (⇧⌘X) puts a cursor in the scrollback and moves it as in vi: hjkl or the arrows,
+          w b e by word, 0 ^ $ along the line, g and G to the top and bottom, Ctrl-U and Ctrl-D by half a screen, with a
+          count such as 5j. Start a selection with v (V for whole lines, o to jump to its other end), copy with y or
+          Return, leave with Esc. / opens Find; n and N then move the cursor between its matches.
         </li>
         <li>
           <strong>Insert Path…</strong> (⇧⌘I) types the paths of files or folders you choose into the session.{' '}
@@ -228,6 +239,7 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
           <tr><td><code>swarmctl new --wait -- make test</code></td><td>Run a command in a new session and exit with its status.</td></tr>
           <tr><td><code>swarmctl status</code></td><td>What programs report about themselves in every session: working, blocked (waiting for you), done or error. <code>-s</code> for one session, <code>--clear</code> to mark it seen.</td></tr>
           <tr><td><code>swarmctl wait -s agent --until blocked,done</code></td><td>Wait until a program needs you or finishes.</td></tr>
+          <tr><td><code>swarmctl agents install</code></td><td>Have Claude Code and Codex report when they're working, waiting for you or done (see <a href="#program-status">Program status</a>). <code>status</code> and <code>uninstall</code> too.</td></tr>
           <tr><td><code>swarmctl ports</code></td><td>TCP ports that programs in sessions listen on, such as a development server, with the program and whether it listens on localhost only. <code>-s</code> for one session. In the app, Go to Anything (⌘P) offers to open them, forwarding the port first when the session is on another host.</td></tr>
           <tr><td><code>swarmctl events</code></td><td>Print changes as they happen: sessions created, exited or renamed, status, bells and notifications. One JSON object per line with <code>--json</code>.</td></tr>
         </tbody>
@@ -248,6 +260,14 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
         also counts bells, keeps the last desktop notification a program asked for (OSC 9, 777 and 99), reads progress
         (OSC 9;4) and the exit code of each command your shell reports (OSC 133). A new prompt or the program exiting
         ends "working" and "blocked"; "done" and "error" stay until the session is seen.
+      </p>
+      <p>
+        Claude Code and Codex report this way once they're set up: choose <strong>Swarm → Set Up Coding Agents…</strong>,
+        or run <code>swarmctl agents install</code>. It adds hooks to <code>~/.claude/settings.json</code> and a notify
+        program to <code>~/.codex/config.toml</code>, after backing up each file, and the app also sets up the hosts
+        you're connected to. Sessions then show Claude Code working, waiting for your permission (with its question) and
+        done, and Codex finishing a turn. Outside Swarm the agents work as before. <code>swarmctl agents status</code>{' '}
+        shows the setup and <code>swarmctl agents uninstall</code> removes it; add <code>--host</code> for a server.
       </p>
       <p>From a script, one line reports a state, with the message in base64:</p>
       <pre class="term">status() &#123; printf '\e]7501;state=%s:msg=%s\e\\' "$1" "$(printf '%s' "$2" | base64 | tr -d '\n')"; &#125;
