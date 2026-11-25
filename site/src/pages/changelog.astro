@@ -4,6 +4,19 @@ import { REPO, REPO_PUBLIC } from '../site';
 
 const releases = [
   {
+    version: '0.1.10',
+    date: '2026-11-25',
+    href: `${REPO}/releases/tag/v0.1.10`,
+    items: [
+      'Go to Anything (⌘P) jumps to sessions by state ("needs you" finds the one waiting), opens new sessions in folders you use, and lists servers that programs in your sessions listen on: "Open localhost:3000", or "Open port 3000 from <session>" on another host, which forwards it over ssh first. The command palette moves to ⇧⌘P.',
+      'Forward Port: type a port such as 3000 in Go to Anything to tunnel it from a connected host with your own ssh config, and open it in the browser. Swarm tells you when nothing is listening on that port yet.',
+      'Scratch Terminal (⌥⌘T): a floating terminal over every window, centered and movable, whose sessions keep running while it is hidden.',
+      'Activity view (⌘.) narrows the sidebar to sessions that need you, finished, failed or have unread output.',
+      'Copy Mode (⇧⌘X) selects scrollback from the keyboard; Insert Path… (⇧⌘I) types chosen file paths into a session; Quick Look Selection (⇧⌘Y) previews a selected path.',
+      'swarmctl ports lists the ports programs in each session listen on.',
+    ],
+  },
+  {
     version: '0.1.9',
     date: '2026-11-24',
     href: `${REPO}/releases/tag/v0.1.9`,

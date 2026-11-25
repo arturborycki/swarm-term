@@ -25,6 +25,13 @@ brew install --cask arturborycki/swarm/swarm
 - **Local or remote:** sessions run on this Mac or on Linux and macOS hosts
   through your own ssh setup. The app installs `swarmd` on a host itself and
   reconnects after sleep or network drops.
+- **See what needs you:** programs report working, blocked, done or failed,
+  and Swarm shows it on the session, notifies you and badges the Dock icon.
+  Go to Anything (⌘P) jumps to the session that is waiting, and the Activity
+  view (⌘.) lists only sessions with something to report.
+- **Open what your sessions serve:** a dev server in a session shows up in Go
+  to Anything as "Open localhost:3000"; on a remote host Swarm forwards the
+  port over ssh first.
 - **Splits and groups:** sessions sit in sidebar groups (This Mac, one per
   host, your own); drag any session onto a pane to show local and remote
   sessions side by side.
@@ -36,7 +43,8 @@ brew install --cask arturborycki/swarm/swarm
 - **Scrollback:** 16 MB per session in memory, optionally more on disk,
   encrypted with a key only that session holds.
 - **`swarmctl`:** list, start, attach to, rename, dump and end sessions, on
-  this Mac or with `--host`.
+  this Mac or with `--host`; send keys, capture the screen and wait for
+  programs from scripts and agents.
 
 Docs: [swarm-term.com/docs](https://swarm-term.com/docs/). Design notes:
 [docs/DESIGN.md](docs/DESIGN.md).
@@ -80,8 +88,7 @@ Other commands: `swarmctl rename`, `kill`, `rm`, `info`, `meta`, `dump`,
 `send-key`, `capture` and `wait` drive a session without attaching to it
 (`-s <session>`, or the session they run in), and `--json` prints JSON.
 `swarmctl status` shows what programs report about themselves (the
-[Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status),
-OSC 7501, plus bells, notifications and progress), `wait --until blocked,done`
+Program Status Protocol, OSC 7501, plus bells, notifications and progress), `wait --until blocked,done`
 waits for a program to need you, and `swarmctl events` streams changes. `swarmctl ports` lists the
 ports programs in sessions listen on, such as a dev server. The daemon starts on first use;
 `swarmd stop` stops it without ending any session.
