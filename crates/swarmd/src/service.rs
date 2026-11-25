@@ -145,6 +145,92 @@ fn notes() -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// macOS, `with-app` mode
+//
+// When an app quits, launchd ends every process that descends from it, even
+// those in their own session (`setsid`) and reparented to launchd: a daemon
+// the app started directly, with all its shims and their shells, got SIGTERM
+// when the app quit. So `swarmd start` doesn't start the daemon itself but
+// has launchd run it as a job of its own, outside any app. Stopping that job
+// only ends the daemon: shims are in their own process groups.
+
+/// The launchd job `swarmd start` runs the daemon as: one per runtime dir, so
+/// daemons with their own `SWARM_RUNTIME_DIR` (tests) don't replace it.
+#[cfg(target_os = "macos")]
+pub fn app_job_label(runtime: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    // FNV-1a: stable across builds, so a newer swarmd replaces the same job.
+    let hash = runtime.as_os_str().as_bytes().iter().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(*b)).wrapping_mul(0x0100_0193));
+    format!("{DEFAULT_NAME}.app.{hash:08x}")
+}
+
+#[cfg(target_os = "macos")]
+fn app_job_text(label: &str, exe: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    // The environment `swarmd start` was run in, as a child would have had
+    // it (sessions inherit it); not what identifies the calling app to
+    // launchd and the system.
+    let env = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .filter(|(k, _)| !k.starts_with("XPC_") && !k.starts_with("__CF"))
+        .map(|(k, v)| format!("<key>{}</key><string>{}</string>", xml_escape(&k), xml_escape(&v)))
+        .collect::<String>();
+    let log = paths::log_dir().join("swarmd.log");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{exe}</string>
+    <string>run</string>
+    <string>--if-not-running</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>AbandonProcessGroup</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardErrorPath</key><string>{log}</string>
+  <key>EnvironmentVariables</key>
+  <dict>{env}</dict>
+</dict>
+</plist>
+"#,
+        label = xml_escape(label),
+        exe = xml_escape(&String::from_utf8_lossy(exe.as_os_str().as_bytes())),
+        log = xml_escape(&log.display().to_string()),
+    )
+}
+
+/// Has launchd start `exe run --if-not-running` as its own job. The caller
+/// waits for the daemon's socket.
+#[cfg(target_os = "macos")]
+pub fn start_app_job(exe: &std::path::Path) -> Result<()> {
+    let runtime = paths::runtime_dir();
+    paths::ensure_private_dir(&runtime)?;
+    let label = app_job_label(&runtime);
+    let plist = runtime.join("swarmd.launchd.plist");
+    paths::write_private(&plist, app_job_text(&label, exe).as_bytes())?;
+    let domain = domain();
+    // The job stays registered after its daemon exits; register it again,
+    // as the program may have changed (an upgrade).
+    let _ = Command::new("launchctl").args(["bootout", &format!("{domain}/{label}")]).output();
+    let mut result = Ok(String::new());
+    for _ in 0..10 {
+        // Right after a bootout, launchd may still be removing the job.
+        result = run(Command::new("launchctl").args(["bootstrap", &domain]).arg(&plist));
+        if result.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // launchd has read it; the environment in it is nobody else's business.
+    let _ = std::fs::remove_file(&plist);
+    result.map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
 // Linux
 
 #[cfg(not(target_os = "macos"))]

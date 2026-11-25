@@ -189,6 +189,86 @@ async fn daemon_started_through_a_symlink_finds_its_shim() {
     let started = swarmd("start");
     assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
     assert!(swarmd("stop").status.success());
+    #[cfg(target_os = "macos")]
+    bootout(&app_job(&dir.path().join("run")));
+}
+
+/// The launchd job `swarmd start` runs the daemon as (see `service.rs`).
+#[cfg(target_os = "macos")]
+fn app_job(runtime: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let hash = runtime.as_os_str().as_bytes().iter().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(*b)).wrapping_mul(0x0100_0193));
+    let uid = paths::uid();
+    let gui = Command::new("launchctl").args(["print", &format!("gui/{uid}")]).output().unwrap().status.success();
+    let domain = if gui { format!("gui/{uid}") } else { format!("user/{uid}") };
+    format!("{domain}/dev.swarm.swarmd.app.{hash:08x}")
+}
+
+#[cfg(target_os = "macos")]
+fn bootout(job: &str) {
+    let _ = Command::new("launchctl").args(["bootout", job]).output();
+}
+
+/// When an app quits (or is force-quit from the Dock), macOS ends every
+/// process the app started, `setsid` or not, and removes the launchd jobs it
+/// registered. So `swarmd start` runs the daemon as a launchd job of its own,
+/// and removing that job ends the daemon but none of the sessions.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn sessions_outlive_the_daemons_launchd_job() {
+    let dir = tempfile::Builder::new().prefix("sw").tempdir_in("/tmp").unwrap();
+    let runtime = dir.path().join("run");
+    let job = app_job(&runtime);
+    struct Cleanup(String, PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            bootout(&self.0);
+            let _ = Command::new("pkill").args(["-f", &format!("runtime-dir {}", self.1.display())]).status();
+        }
+    }
+    let _cleanup = Cleanup(job.clone(), runtime.clone());
+    let swarmd = |arg: &str| {
+        Command::new(env!("CARGO_BIN_EXE_swarmd"))
+            .arg(arg)
+            .env("SWARM_RUNTIME_DIR", &runtime)
+            .env("SWARM_STATE_DIR", dir.path().join("state"))
+            .env("SWARM_SHIM_PATH", env!("CARGO_BIN_EXE_swarm-shim"))
+            .output()
+            .unwrap()
+    };
+    let started = swarmd("start");
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    let print = Command::new("launchctl").args(["print", &job]).output().unwrap();
+    assert!(String::from_utf8_lossy(&print.stdout).contains("state = running"), "the daemon isn't launchd job {job}");
+
+    let connect = || async {
+        let s = UnixStream::connect(paths::daemon_socket(&runtime)).await?;
+        let (rd, wr) = s.into_split();
+        Client::handshake(rd, wr, "e2e").await
+    };
+    let c = connect().await.unwrap();
+    let info = c.create(sh_opts("kept")).await.unwrap();
+    let shim = shim_pid(info.pid);
+    drop(c);
+
+    // What happens to it when the app that started it quits.
+    bootout(&job);
+    for _ in 0..500 {
+        if connect().await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(connect().await.is_err(), "the daemon is still running");
+    assert_eq!(unsafe { libc::kill(shim as i32, 0) }, 0, "the session's shim went with the daemon");
+    assert_eq!(unsafe { libc::kill(info.pid as i32, 0) }, 0, "the session's shell went with the daemon");
+
+    let started = swarmd("start");
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    let listed = connect().await.unwrap().list().await.unwrap();
+    let kept = listed.iter().find(|s| s.id == info.id).expect("session re-adopted");
+    assert!(kept.is_running());
+    remove_shim(&paths::shim_socket(&runtime, &info.id)).await;
 }
 
 #[tokio::test]
