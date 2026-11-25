@@ -257,6 +257,11 @@ impl Server {
             }
             Request::Screen { id } => Response::Screen(r.screen(&id).await?),
             Request::Status => Response::Statuses(r.statuses()),
+            Request::Ports => {
+                // ps and lsof (or /proc) block: keep them off the runtime.
+                let sessions = r.list();
+                Response::Ports(tokio::task::spawn_blocking(move || crate::ports::session_ports(&sessions)).await?)
+            }
             Request::ClearStatus { id } => {
                 r.clear_status(&id).await?;
                 Response::Ok

@@ -1,6 +1,7 @@
 //! `swarmd`: the per-user session daemon.
 
 mod memory;
+mod ports;
 mod registry;
 mod restore;
 mod server;
