@@ -82,7 +82,8 @@ Other commands: `swarmctl rename`, `kill`, `rm`, `info`, `meta`, `dump`,
 `swarmctl status` shows what programs report about themselves (the
 [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status),
 OSC 7501, plus bells, notifications and progress), `wait --until blocked,done`
-waits for a program to need you, and `swarmctl events` streams changes. The daemon starts on first use;
+waits for a program to need you, and `swarmctl events` streams changes. `swarmctl ports` lists the
+ports programs in sessions listen on, such as a dev server. The daemon starts on first use;
 `swarmd stop` stops it without ending any session.
 
 To start the daemon at login instead (launchd agent on macOS, systemd user unit
