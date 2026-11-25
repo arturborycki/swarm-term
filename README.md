@@ -90,7 +90,8 @@ Other commands: `swarmctl rename`, `kill`, `rm`, `info`, `meta`, `dump`,
 (`-s <session>`, or the session they run in), and `--json` prints JSON.
 `swarmctl status` shows what programs report about themselves (the
 Program Status Protocol, OSC 7501, plus bells, notifications and progress), `wait --until blocked,done`
-waits for a program to need you, and `swarmctl events` streams changes. `swarmctl ports` lists the
+waits for a program to need you, and `swarmctl events` streams changes. `swarmctl agents install`
+has Claude Code and Codex report their state through hooks. `swarmctl ports` lists the
 ports programs in sessions listen on, such as a dev server. The daemon starts on first use;
 `swarmd stop` stops it without ending any session.
 
