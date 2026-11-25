@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use swarm_proto::{
     paths, read_frame, write_frame, AttachMode, ClientMsg, CreateOpts, MetaUpdate, Request, Response, ServerMsg,
-    ProgramStatus, SessionEvent, SessionId, SessionInfo, Size, StreamId, PROTOCOL_VERSION,
+    ListeningPort, ProgramStatus, SessionEvent, SessionId, SessionInfo, Size, StreamId, PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
@@ -372,6 +372,14 @@ impl Client {
     pub async fn status(&self) -> Result<Vec<(SessionId, ProgramStatus)>> {
         match self.request(Request::Status).await? {
             Response::Statuses(s) => Ok(s),
+            other => bail!("unexpected {other:?}"),
+        }
+    }
+
+    /// The TCP ports programs in each running session listen on.
+    pub async fn ports(&self) -> Result<Vec<(SessionId, Vec<ListeningPort>)>> {
+        match self.request(Request::Ports).await? {
+            Response::Ports(p) => Ok(p),
             other => bail!("unexpected {other:?}"),
         }
     }

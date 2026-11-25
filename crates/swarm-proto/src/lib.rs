@@ -176,6 +176,9 @@ pub enum Request {
     /// The user has seen the session: drop its `done` and `error` records
     /// and its last notification.
     ClearStatus { id: SessionId },
+    /// The TCP ports programs in each running session listen on, such as a
+    /// development server started there. Answered with [`Response::Ports`].
+    Ports,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -196,6 +199,20 @@ pub enum Response {
     // New variants go last.
     Screen(ScreenCapture),
     Statuses(Vec<(SessionId, ProgramStatus)>),
+    Ports(Vec<(SessionId, Vec<ListeningPort>)>),
+}
+
+/// A TCP port a program in a session listens on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ListeningPort {
+    pub port: u16,
+    /// The listening process.
+    pub pid: u32,
+    /// Its name ("node", "python3").
+    pub program: String,
+    /// Bound to 127.0.0.1 or ::1 only, so reachable from other machines
+    /// only through a forward.
+    pub loopback_only: bool,
 }
 
 /// A session's screen: the visible rows (no scrollback), as the shim's

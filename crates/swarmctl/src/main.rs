@@ -136,6 +136,13 @@ enum Cmd {
         #[arg(long, requires = "session")]
         clear: bool,
     },
+    /// TCP ports that programs in sessions listen on, such as a development
+    /// server. Every session, or one with -s.
+    Ports {
+        /// Session id, id prefix or name.
+        #[arg(short, long)]
+        session: Option<String>,
+    },
     /// Print changes as they happen: sessions created, exited, renamed or
     /// removed, clients attaching, program status, bells and notifications.
     Events,
@@ -462,6 +469,48 @@ async fn run(cli: Cli) -> Result<i32> {
                 print_json(&all)?;
             } else {
                 print_status_table(&sessions, &statuses);
+            }
+            Ok(0)
+        }
+        Cmd::Ports { session } => {
+            let mut ports = client.ports().await.map_err(|e| older_daemon(&client, e))?;
+            let sessions = client.list().await?;
+            if let Some(q) = session {
+                let s = resolve(&sessions, &q).map_err(|e| Exit(EXIT_NOT_FOUND, format!("{e:#}")))?;
+                ports.retain(|(id, _)| *id == s.id);
+            }
+            if json {
+                let all: Vec<_> = ports
+                    .iter()
+                    .flat_map(|(id, list)| {
+                        let name = sessions.iter().find(|s| s.id == *id).map(|s| s.display_name());
+                        list.iter().map(move |p| {
+                            serde_json::json!({
+                                "id": id, "name": name, "port": p.port, "pid": p.pid,
+                                "program": p.program, "loopback_only": p.loopback_only,
+                            })
+                        })
+                    })
+                    .collect();
+                print_json(&all)?;
+            } else {
+                if ports.is_empty() {
+                    println!("No session has a program listening on a port.");
+                    return Ok(0);
+                }
+                println!("{:<10}  {:<20}  {:>5}  {:<8}  {:<16}  ADDRESS", "ID", "NAME", "PORT", "PID", "PROGRAM");
+                for (id, list) in &ports {
+                    let id_short: String = id.chars().take(10).collect();
+                    let name: String = sessions
+                        .iter()
+                        .find(|s| s.id == *id)
+                        .map(|s| s.display_name().chars().take(20).collect())
+                        .unwrap_or_default();
+                    for p in list {
+                        let addr = if p.loopback_only { "localhost" } else { "all interfaces" };
+                        println!("{id_short:<10}  {name:<20}  {:>5}  {:<8}  {:<16}  {addr}", p.port, p.pid, p.program);
+                    }
+                }
             }
             Ok(0)
         }

@@ -393,9 +393,19 @@ async fn programs_report_status_through_escape_sequences() {
     assert_eq!(st.notification.as_ref().unwrap().body, "Needs you");
     assert!(st.bells >= 1);
     // Subscribers were told.
-    let (id, pushed) = timeout(Duration::from_secs(5), changes.recv()).await.unwrap().unwrap();
-    assert_eq!(id, info.id);
-    assert!(!pushed.records.is_empty() || pushed.bells > 0);
+    // Pushes come per change, so earlier ones (a bare notification) may
+    // arrive first under load: wait for one with the report.
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let (id, pushed) = changes.recv().await.unwrap();
+            assert_eq!(id, info.id);
+            if !pushed.records.is_empty() || pushed.bells > 0 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("subscribers were told");
 
     // A new prompt ends `blocked`; `done` stays until the session is seen.
     c.write(&info.id, b"printf '\\033]7501;state=done:id=build\\007\\033]133;A\\007'\r".to_vec()).await.unwrap();
@@ -1552,4 +1562,35 @@ async fn heavy_input_while_output_is_not_read_does_not_wedge() {
     let mut b = c2.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
     b.input(b"second\n".to_vec()).await.unwrap();
     read_until(&mut b, "second").await;
+}
+
+#[tokio::test]
+async fn ports_lists_what_programs_in_a_session_listen_on() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let info = c.create(sh_opts("server")).await.unwrap();
+    let quiet = c.create(sh_opts("quiet")).await.unwrap();
+    // A free port, then a program under the session's shell listening on it.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let cmd = format!(
+        "python3 -c \"import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); time.sleep(20)\"\r"
+    );
+    c.write(&info.id, cmd.into_bytes()).await.unwrap();
+
+    let mut found = None;
+    for _ in 0..100 {
+        let all = c.ports().await.unwrap();
+        assert!(all.iter().all(|(id, _)| *id != quiet.id), "a session with no listener isn't listed");
+        if let Some((_, list)) = all.into_iter().find(|(id, _)| *id == info.id) {
+            found = list.into_iter().find(|p| p.port == port);
+            if found.is_some() {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let p = found.expect("the session's port was found");
+    assert!(p.loopback_only);
+    assert!(p.program.starts_with("python") || p.program.starts_with("Python"), "program {:?}", p.program);
+    c.kill(&info.id, libc::SIGKILL).await.unwrap();
 }
