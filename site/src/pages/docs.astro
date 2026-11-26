@@ -75,6 +75,7 @@ const toc = [
         remote, can share one window, and they keep running as they move. Drag the dividers to resize.
       </p>
       <p>
+        <strong>Rename Pane…</strong> names just the focused pane's session; renaming a tab names all of its sessions.
         The Session menu also moves panes and tabs around: <strong>Move Pane to New Tab</strong>,{' '}
         <strong>Move Pane to Tab…</strong> (choose the tab in Go to Anything), <strong>Move Pane to New Window</strong>{' '}
         and <strong>Move Tab to New Window</strong>.
@@ -95,7 +96,8 @@ const toc = [
       <ul>
         <li>
           <strong>Activity</strong> (⌘., or the ACTIVITY toggle at the top of the sidebar) narrows the sidebar to
-          sessions that need you, finished, failed, report work or have unread output, and sums them up in its header.
+          sessions that need you, finished, failed, report work or have unread output, most urgent first within each
+          group, and sums them up in its header.
         </li>
         <li>
           <strong>Filter Sessions…</strong> (⌥⌘F) finds sessions by name, host or state, such as "needs you", "finished"
@@ -114,7 +116,14 @@ const toc = [
           Return, leave with Esc. / opens Find; n and N then move the cursor between its matches.
         </li>
         <li>
-          <strong>Insert Path…</strong> (⇧⌘I) types the paths of files or folders you choose into the session.{' '}
+          <strong>Go to Directory…</strong> (⇧⌘G) lists the folders your sessions use on the same host; choosing one
+          runs <code>cd</code> there, or opens a new session in it if a program is running.
+        </li>
+        <li>
+          <strong>Insert Path…</strong> (⇧⌘I) types the paths of files or folders you choose into the session. In a
+          session on another host, these files, and any you drop on it, are copied there first (to{' '}
+          <code>~/.cache/swarm/uploads/</code>) and their paths there are typed, so you can hand a screenshot to an agent
+          running on a server.{' '}
           <strong>Quick Look Selection</strong> (⇧⌘Y) previews a selected path, or opens a selected link in the browser.
         </li>
       </ul>
