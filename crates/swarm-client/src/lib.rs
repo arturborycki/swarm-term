@@ -593,7 +593,8 @@ async fn start_local_daemon() -> Result<()> {
 // Replay hygiene
 
 /// Removes what a terminal sends in answer to queries (device attributes,
-/// cursor position and mode reports, OSC color and DCS replies) and keeps
+/// cursor position and mode reports, OSC color, DCS and APC replies such as
+/// the answer to a kitty graphics check) and keeps
 /// everything the user typed.
 pub fn strip_terminal_responses(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
@@ -633,8 +634,10 @@ fn response_len(s: &[u8]) -> Option<usize> {
             // A bare ESC [ R would be a key, not a report.
             (report && j > 2).then_some(j + 1)
         }
-        // OSC and DCS replies, terminated by BEL or ST.
-        b']' | b'P' => {
+        // OSC, DCS and APC replies, terminated by BEL or ST. A replayed kitty
+        // graphics check is answered with `ESC _ G i=31;OK ESC \`; zsh reads
+        // `ESC _` as insert-last-word and the rest as typing.
+        b']' | b'P' | b'_' => {
             let mut j = 2;
             while j < s.len() {
                 if s[j] == 0x07 {
@@ -794,6 +797,7 @@ mod filter_tests {
         assert_eq!(strip(b"x\x1b]11;rgb:0000/0000/0000\x07y"), b"xy");
         assert_eq!(strip(b"\x1bP>|xterm(390)\x1b\\z"), b"z");
         assert_eq!(strip(b"\x1b[?2004;1$yq"), b"q");
+        assert_eq!(strip(b"\x1b_Gi=31;OK\x1b\\w"), b"w");
     }
 
     fn filter_all(chunks: &[&[u8]]) -> Vec<u8> {
