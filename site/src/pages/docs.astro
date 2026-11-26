@@ -120,6 +120,21 @@ const toc = [
           runs <code>cd</code> there, or opens a new session in it if a program is running.
         </li>
         <li>
+          <strong>Find in All Sessions…</strong> (⇧⌘F) searches the output of every session, on this Mac and on
+          connected hosts, detached ones and output kept on disk included. Type the text after <em>find</em> in Go to
+          Anything and press Return; the matching lines are listed, newest first, with their session. Choosing one opens
+          that session with Find on the text. It matches plain text, ignoring case unless you type a capital letter.
+        </li>
+        <li>
+          <strong>tmux-style prefix keys</strong>: in Settings → Keyboard Shortcuts, choose Ctrl-B (as in tmux) or
+          Ctrl-A (as in screen). Then the prefix and a key work on panes and tabs: <code>c</code> new tab,{' '}
+          <code>%</code> split right, <code>"</code> split down, the arrows move between panes, <code>o</code> next pane,{' '}
+          <code>z</code> zoom, <code>x</code> close the pane, <code>n</code> and <code>p</code> next and previous tab,{' '}
+          <code>1</code>–<code>9</code> a tab, <code>,</code> rename the pane, <code>[</code> Copy Mode, <code>w</code>{' '}
+          Go to Anything. <code>r</code> starts resize mode: the arrows (or hjkl) resize the pane until Esc or Return.
+          The prefix pressed twice sends it to the program, such as Ctrl-B to a full-screen editor.
+        </li>
+        <li>
           <strong>Insert Path…</strong> (⇧⌘I) types the paths of files or folders you choose into the session. In a
           session on another host, these files, and any you drop on it, are copied there first (to{' '}
           <code>~/.cache/swarm/uploads/</code>) and their paths there are typed, so you can hand a screenshot to an agent
@@ -212,6 +227,11 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
         default (<code>--limit-mb N</code> changes it). The key exists only in that session's process, and the files are
         deleted when the session ends or the setting is turned off.
       </p>
+      <p>
+        Find in All Sessions (⇧⌘F) and <code>swarmctl grep</code> search the most recent 64 MB of each session's
+        output, what's on disk included. The search runs in each session's own process, so the output never leaves
+        the host it's on; only the matching lines do.
+      </p>
       <pre class="term"><span class="p">$</span> swarmctl dump build &gt; build.log      <span class="d"># all kept output, as text</span>
 <span class="p">$</span> swarmctl dump build --raw            <span class="d"># with escape codes</span></pre>
 
@@ -250,6 +270,7 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
           <tr><td><code>swarmctl wait -s agent --until blocked,done</code></td><td>Wait until a program needs you or finishes.</td></tr>
           <tr><td><code>swarmctl agents install</code></td><td>Have Claude Code and Codex report when they're working, waiting for you or done (see <a href="#program-status">Program status</a>). <code>status</code> and <code>uninstall</code> too.</td></tr>
           <tr><td><code>swarmctl ports</code></td><td>TCP ports that programs in sessions listen on, such as a development server, with the program and whether it listens on localhost only. <code>-s</code> for one session. In the app, Go to Anything (⌘P) offers to open them, forwarding the port first when the session is on another host.</td></tr>
+          <tr><td><code>swarmctl grep 'disk full'</code></td><td>Find text in every session's output, output kept on disk included: the matching lines, newest first, under their session. Ignores case unless the text has a capital letter (<code>-i</code> and <code>-S</code> choose). <code>-s</code> for one session, <code>--max</code> for how many lines per session. Exits 1 when nothing matches.</td></tr>
           <tr><td><code>swarmctl events</code></td><td>Print changes as they happen: sessions created, exited or renamed, status, bells and notifications. One JSON object per line with <code>--json</code>.</td></tr>
         </tbody>
       </table>

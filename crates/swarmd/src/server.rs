@@ -262,6 +262,7 @@ impl Server {
                 let sessions = r.list();
                 Response::Ports(tokio::task::spawn_blocking(move || crate::ports::session_ports(&sessions)).await?)
             }
+            Request::Search(opts) => Response::Found(r.search(opts).await),
             Request::ClearStatus { id } => {
                 r.clear_status(&id).await?;
                 Response::Ok

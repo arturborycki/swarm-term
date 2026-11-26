@@ -179,6 +179,9 @@ pub enum Request {
     /// The TCP ports programs in each running session listen on, such as a
     /// development server started there. Answered with [`Response::Ports`].
     Ports,
+    /// Look for text in every session's scrollback, spilled output included.
+    /// Answered with [`Response::Found`].
+    Search(SearchOpts),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -200,6 +203,46 @@ pub enum Response {
     Screen(ScreenCapture),
     Statuses(Vec<(SessionId, ProgramStatus)>),
     Ports(Vec<(SessionId, Vec<ListeningPort>)>),
+    /// Sessions with a match, each with its most recent matching lines.
+    Found(Vec<SessionHits>),
+}
+
+/// What [`Request::Search`] looks for.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SearchOpts {
+    /// Plain text, not a pattern.
+    pub text: String,
+    /// `None`: only when `text` has a capital letter (smart case).
+    pub case_sensitive: Option<bool>,
+    /// Most matching lines kept per session, the most recent ones.
+    pub max_hits: u32,
+}
+
+impl SearchOpts {
+    pub fn is_case_sensitive(&self) -> bool {
+        self.case_sensitive.unwrap_or_else(|| self.text.chars().any(char::is_uppercase))
+    }
+}
+
+/// One line of output that matches.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SearchHit {
+    /// Where the line starts in the session's output.
+    pub offset: u64,
+    /// The line as text (escape sequences removed), shortened around the
+    /// match when it's long.
+    pub line: String,
+    /// Where the match is in `line`, in characters: start and length.
+    pub at: (u32, u32),
+}
+
+/// A session's matches, newest first.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionHits {
+    pub id: SessionId,
+    pub hits: Vec<SearchHit>,
+    /// Matching lines in all, including those not kept.
+    pub total: u64,
 }
 
 /// A TCP port a program in a session listens on.
@@ -319,6 +362,8 @@ pub enum ShimRequest {
     WatchStatus,
     /// The user has seen the session (see `Request::ClearStatus`).
     ClearStatus,
+    /// Answered with `ShimMsg::Found`.
+    Search(SearchOpts),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -344,6 +389,8 @@ pub enum ShimMsg {
     // New variants go last.
     Screen(ScreenCapture),
     Status(ProgramStatus),
+    /// Matching lines, newest first, and how many matched in all.
+    Found { hits: Vec<SearchHit>, total: u64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +550,8 @@ mod tests {
         assert_eq!(tag(postcard::to_stdvec(&Request::Shutdown).unwrap()), 8);
         assert_eq!(tag(postcard::to_stdvec(&Request::UpgradeShims { force: false }).unwrap()), 9);
         assert_eq!(tag(postcard::to_stdvec(&Request::ApplySpill).unwrap()), 10);
+        assert_eq!(tag(postcard::to_stdvec(&Request::Ports).unwrap()), 16);
+        assert_eq!(tag(postcard::to_stdvec(&ShimRequest::ClearStatus).unwrap()), 14);
         assert_eq!(tag(postcard::to_stdvec(&AttachMode::Live).unwrap()), 2);
         assert_eq!(tag(postcard::to_stdvec(&AttachMode::History).unwrap()), 3);
         assert_eq!(tag(postcard::to_stdvec(&ShimMsg::Lagged { resume_at: 0 }).unwrap()), 7);

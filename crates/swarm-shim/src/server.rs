@@ -83,6 +83,14 @@ async fn handle(
         }
         ShimRequest::Screen => write_frame(&mut wr, &ShimMsg::Screen(session.capture())).await,
         ShimRequest::Status => write_frame(&mut wr, &ShimMsg::Status(session.program_status())).await,
+        ShimRequest::Search(opts) => {
+            let s = session.clone();
+            let reply = match tokio::task::spawn_blocking(move || s.search(&opts)).await {
+                Ok((hits, total)) => ShimMsg::Found { hits, total },
+                Err(e) => ShimMsg::Err(format!("search failed: {e}")),
+            };
+            write_frame(&mut wr, &reply).await
+        }
         ShimRequest::ClearStatus => {
             session.clear_status();
             write_frame(&mut wr, &ShimMsg::Ok).await

@@ -384,6 +384,14 @@ impl Client {
         }
     }
 
+    /// Lines with `opts.text` in each session's output, for sessions with a match.
+    pub async fn search(&self, opts: swarm_proto::SearchOpts) -> Result<Vec<swarm_proto::SessionHits>> {
+        match self.request(Request::Search(opts)).await? {
+            Response::Found(found) => Ok(found),
+            other => bail!("unexpected {other:?}"),
+        }
+    }
+
     /// The user has seen the session: drop its `done` and `error` records
     /// and its last notification.
     pub async fn clear_status(&self, id: &str) -> Result<()> {

@@ -2,6 +2,7 @@
 //! serves it on `$RUNTIME/shims/<id>.sock`. It outlives `swarmd` and the GUI.
 
 mod buffer;
+mod find;
 pub mod handoff;
 mod scan;
 mod screen;

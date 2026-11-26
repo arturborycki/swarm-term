@@ -658,6 +658,32 @@ impl Session {
         }
     }
 
+    /// Lines of output with `opts.text`, from spilled output and the
+    /// in-memory buffer: the most recent [`crate::find::MAX_SEARCHED`] bytes.
+    /// Blocks while it reads and decrypts spilled output.
+    pub fn search(&self, opts: &swarm_proto::SearchOpts) -> (Vec<swarm_proto::SearchHit>, u64) {
+        let (spill, ring_start, ring) = {
+            let inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let start = inner.ring.start();
+            (inner.spill.clone(), start, inner.ring.slice(start, inner.ring.end()).unwrap_or_default())
+        };
+        let end = ring_start + ring.len() as u64;
+        let from = end.saturating_sub(crate::find::MAX_SEARCHED);
+        let mut finder = crate::find::Finder::new(opts, from);
+        if let Some(spill) = spill.filter(|_| from < ring_start) {
+            for piece in spill.pieces(ring_start) {
+                let Some((start, bytes)) = spill.read(&piece, ring_start) else { continue };
+                let skip = from.saturating_sub(start).min(bytes.len() as u64) as usize;
+                if skip < bytes.len() {
+                    finder.feed(start + skip as u64, &bytes[skip..]);
+                }
+            }
+        }
+        let skip = from.saturating_sub(ring_start) as usize;
+        finder.feed(ring_start + skip as u64, &ring[skip..]);
+        finder.finish()
+    }
+
     /// The screen as the terminal model has it now.
     pub fn capture(&self) -> swarm_proto::ScreenCapture {
         let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

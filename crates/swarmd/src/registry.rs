@@ -19,6 +19,9 @@ use tokio::sync::broadcast;
 
 /// How long a shim may take to answer a request.
 const SHIM_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a shim may take to search its output (decrypting spilled output included).
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// For requests that wait for the session's process (`Remove`) or start a
 /// program (`Upgrade`).
 const SHIM_SLOW_TIMEOUT: Duration = Duration::from_secs(20);
@@ -600,6 +603,43 @@ impl Registry {
             }
         })
         .await
+    }
+
+    /// Lines with `opts.text` in each session's output; sessions without a
+    /// match, or whose shim can't search (an older build), are left out.
+    pub async fn search(self: &Arc<Self>, opts: swarm_proto::SearchOpts) -> Vec<swarm_proto::SessionHits> {
+        let mut asks = tokio::task::JoinSet::new();
+        for info in self.list() {
+            let opts = opts.clone();
+            let this = self.clone();
+            asks.spawn(async move {
+                let this = &this;
+                let found = timed(SEARCH_TIMEOUT, async {
+                    let mut stream = this.connect(&info.id).await?;
+                    write_frame(&mut stream, &ShimRequest::Search(opts)).await?;
+                    match read_frame::<_, ShimMsg>(&mut stream).await? {
+                        Some(ShimMsg::Found { hits, total }) => Ok((hits, total)),
+                        Some(ShimMsg::Err(e)) => bail!("{e}"),
+                        None => bail!("its shim is from an older build that doesn't support this"),
+                        other => bail!("unexpected reply {other:?}"),
+                    }
+                })
+                .await;
+                match found {
+                    Ok((hits, total)) if total > 0 => Some(swarm_proto::SessionHits { id: info.id, hits, total }),
+                    Ok(_) => None,
+                    Err(e) => {
+                        tracing::debug!(id = info.id, "search: {e:#}");
+                        None
+                    }
+                }
+            });
+        }
+        let mut found = Vec::new();
+        while let Some(done) = asks.join_next().await {
+            found.extend(done.ok().flatten());
+        }
+        found
     }
 
     pub async fn info(&self, id: &str) -> Result<SessionInfo> {

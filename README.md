@@ -30,6 +30,12 @@ brew install --cask arturborycki/swarm/swarm
   and Swarm shows it on the session, notifies you and badges the Dock icon.
   Go to Anything (⌘P) jumps to the session that is waiting, and the Activity
   view (⌘.) lists only sessions with something to report.
+- **Find in every session:** Find in All Sessions (⇧⌘F) searches the output
+  of all your sessions, on this Mac and connected hosts, detached ones and
+  output kept on disk included, and opens the one you pick at the match.
+- **tmux keys if you want them:** turn on Ctrl-B (or Ctrl-A) prefix keys in
+  Settings → Keyboard Shortcuts to split, move between, zoom and resize panes
+  as in tmux.
 - **Open what your sessions serve:** a dev server in a session shows up in Go
   to Anything as "Open localhost:3000"; on a remote host Swarm forwards the
   port over ssh first.
@@ -92,7 +98,8 @@ Other commands: `swarmctl rename`, `kill`, `rm`, `info`, `meta`, `dump`,
 Program Status Protocol, OSC 7501, plus bells, notifications and progress), `wait --until blocked,done`
 waits for a program to need you, and `swarmctl events` streams changes. `swarmctl agents install`
 has Claude Code and Codex report their state through hooks. `swarmctl ports` lists the
-ports programs in sessions listen on, such as a dev server. The daemon starts on first use;
+ports programs in sessions listen on, such as a dev server, and `swarmctl grep <text>` finds text in
+every session's output. The daemon starts on first use;
 `swarmd stop` stops it without ending any session.
 
 To start the daemon at login instead (launchd agent on macOS, systemd user unit

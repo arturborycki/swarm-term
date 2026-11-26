@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use swarm_client::{resolve, Attachment, Client, StreamEvent};
-use swarm_proto::{
+use swarm_proto::{SearchOpts, 
     now_ms, AttachMode, CreateOpts, MetaUpdate, ProgramStatus, SessionInfo, SessionState, Size, StatusRecord, StatusState,
 };
 use tokio::sync::mpsc;
@@ -144,6 +144,24 @@ enum Cmd {
         /// Session id, id prefix or name.
         #[arg(short, long)]
         session: Option<String>,
+    },
+    /// Find text in sessions' output: every session's scrollback, spilled
+    /// output included, newest lines first. Plain text, case-insensitive
+    /// unless it has a capital letter. Exits 1 when nothing matches.
+    Grep {
+        text: String,
+        /// Only this session: id, id prefix or name.
+        #[arg(short, long)]
+        session: Option<String>,
+        /// Ignore case even when the text has capitals.
+        #[arg(short, long, conflicts_with = "case_sensitive")]
+        ignore_case: bool,
+        /// Match case even when the text has no capitals.
+        #[arg(short = 'S', long)]
+        case_sensitive: bool,
+        /// Most lines shown per session, the most recent ones.
+        #[arg(short, long, default_value_t = 20)]
+        max: u32,
     },
     /// Print changes as they happen: sessions created, exited, renamed or
     /// removed, clients attaching, program status, bells and notifications.
@@ -583,6 +601,43 @@ async fn run(cli: Cli) -> Result<i32> {
                 }
             }
             Ok(0)
+        }
+        Cmd::Grep { text, session, ignore_case, case_sensitive, max } => {
+            let case_sensitive = match (ignore_case, case_sensitive) {
+                (true, _) => Some(false),
+                (_, true) => Some(true),
+                _ => None,
+            };
+            let opts = SearchOpts { text, case_sensitive, max_hits: max.max(1) };
+            let mut found = client.search(opts).await.map_err(|e| older_daemon(&client, e))?;
+            let sessions = client.list().await?;
+            if let Some(q) = session {
+                let s = resolve(&sessions, &q).map_err(|e| Exit(EXIT_NOT_FOUND, format!("{e:#}")))?;
+                found.retain(|f| f.id == s.id);
+            }
+            // Sessions with the most recent output first.
+            let last_output = |id: &str| sessions.iter().find(|s| s.id == id).map_or(0, |s| s.last_output_ms);
+            found.sort_by_key(|f| std::cmp::Reverse(last_output(&f.id)));
+            let name = |id: &str| sessions.iter().find(|s| s.id == id).map(|s| s.display_name().to_string()).unwrap_or_default();
+            if json {
+                let all: Vec<_> = found
+                    .iter()
+                    .map(|f| serde_json::json!({ "id": f.id, "name": name(&f.id), "total": f.total, "hits": f.hits }))
+                    .collect();
+                print_json(&all)?;
+            } else {
+                let mut out = std::io::stdout().lock();
+                for f in &found {
+                    let more = f.total.saturating_sub(f.hits.len() as u64);
+                    let id_short: String = f.id.chars().take(10).collect();
+                    let extra = if more > 0 { format!(", {more} older not shown") } else { String::new() };
+                    writeln!(out, "{} ({id_short}): {} matching line{}{extra}", name(&f.id), f.total, if f.total == 1 { "" } else { "s" })?;
+                    for hit in &f.hits {
+                        writeln!(out, "  {}", hit.line)?;
+                    }
+                }
+            }
+            Ok(if found.is_empty() { 1 } else { 0 })
         }
         Cmd::Events => events(&client, json).await.map_err(|e| older_daemon(&client, e)),
         Cmd::Dump { session, raw } => {
