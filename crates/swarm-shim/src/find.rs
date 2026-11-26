@@ -130,15 +130,23 @@ fn shown(line: &str, at: usize, len: usize, offset: u64) -> SearchHit {
     if to < chars.len() {
         text.push('…');
     }
-    // Leading blanks only push the match to the right.
-    let trimmed = text.trim_start();
-    let cut = text.chars().count() - trimmed.chars().count();
-    let (line, start) = if cut <= start { (trimmed.trim_end().to_string(), start - cut) } else { (text.trim_end().to_string(), start) };
-    SearchHit { offset, line, at: (start as u32, len as u32) }
+    // Blanks before and after only push the match around; those in the
+    // match itself stay.
+    let chars: Vec<char> = text.chars().collect();
+    let lead = chars[..start].iter().take_while(|c| c.is_whitespace()).count();
+    let tail = chars[start + len..].iter().rev().take_while(|c| c.is_whitespace()).count();
+    let line: String = chars[lead..chars.len() - tail].iter().collect();
+    SearchHit { offset, line, at: ((start - lead) as u32, len as u32) }
 }
 
 impl Perform for Lines {
     fn print(&mut self, c: char) {
+        // Results are shown in other terminals: no control characters (vte
+        // passes a C1 one through when its bytes span two pieces) or
+        // invisible ones.
+        if swarm_proto::is_unsafe_char(c) {
+            return;
+        }
         if self.cr {
             self.line.clear();
             self.cr = false;
@@ -253,6 +261,23 @@ mod tests {
         let shown: String = hit.line.chars().skip(hit.at.0 as usize).take(hit.at.1 as usize).collect();
         assert_eq!(shown, "needle");
         assert!(hit.line.chars().count() <= SHOWN + 2);
+    }
+
+    #[test]
+    fn blanks_in_the_match_are_kept() {
+        let (hits, _) = search("error: ", &[b"  error: \n"]);
+        assert_eq!(hits[0].line, "error: ");
+        assert_eq!(hits[0].at, (0, 7));
+    }
+
+    #[test]
+    fn control_and_invisible_characters_are_dropped() {
+        // U+009B (8-bit CSI) split across pieces.
+        let (hits, _) = search("a", &[b"a\xc2", b"\x9bb\n"]);
+        assert!(!hits[0].line.chars().any(swarm_proto::is_unsafe_char), "{:?}", hits[0].line);
+        // A right-to-left override and a zero-width space.
+        let (hits, _) = search("ab", &["a\u{202e}\u{200b}b\n".as_bytes()]);
+        assert_eq!(lines(&hits), ["ab"]);
     }
 
     #[test]

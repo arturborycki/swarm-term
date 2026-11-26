@@ -203,8 +203,9 @@ pub enum Response {
     Screen(ScreenCapture),
     Statuses(Vec<(SessionId, ProgramStatus)>),
     Ports(Vec<(SessionId, Vec<ListeningPort>)>),
-    /// Sessions with a match, each with its most recent matching lines.
-    Found(Vec<SessionHits>),
+    /// Sessions with a match, each with its most recent matching lines, and
+    /// those that weren't searched.
+    Found(SearchResults),
 }
 
 /// What [`Request::Search`] looks for.
@@ -218,10 +219,35 @@ pub struct SearchOpts {
     pub max_hits: u32,
 }
 
+/// Most matching lines kept per session.
+pub const MAX_SEARCH_HITS: u32 = 1000;
+/// Longest search text, in bytes; longer text can't match a kept line anyway.
+pub const MAX_SEARCH_TEXT: usize = 1024;
+
 impl SearchOpts {
     pub fn is_case_sensitive(&self) -> bool {
         self.case_sensitive.unwrap_or_else(|| self.text.chars().any(char::is_uppercase))
     }
+
+    /// Within the limits: an error for text too long to search for, and at
+    /// most [`MAX_SEARCH_HITS`] lines per session.
+    pub fn checked(mut self) -> Result<SearchOpts, String> {
+        if self.text.len() > MAX_SEARCH_TEXT {
+            return Err(format!("the text is longer than {MAX_SEARCH_TEXT} bytes"));
+        }
+        self.max_hits = self.max_hits.clamp(1, MAX_SEARCH_HITS);
+        Ok(self)
+    }
+}
+
+/// The answer to [`Request::Search`].
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchResults {
+    /// Sessions with a match.
+    pub found: Vec<SessionHits>,
+    /// Sessions that weren't searched (an older build, too slow, or the
+    /// answer was too big), with why.
+    pub skipped: Vec<(SessionId, String)>,
 }
 
 /// One line of output that matches.
@@ -525,6 +551,20 @@ pub mod hex {
         }
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
     }
+}
+
+/// Characters that must not reach a terminal from session output shown
+/// elsewhere (titles, search results): control characters, which can start
+/// escape sequences (C1 ones included), and invisible or direction-changing
+/// characters, which make text read differently from what it is.
+pub fn is_unsafe_char(c: char) -> bool {
+    c.is_control() && c != '\t'
+        || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
+}
+
+/// `text` without [`is_unsafe_char`] characters; a tab becomes a space.
+pub fn clean_text(text: &str) -> String {
+    text.chars().filter(|&c| !is_unsafe_char(c)).map(|c| if c == '\t' { ' ' } else { c }).collect()
 }
 
 pub fn now_ms() -> u64 {

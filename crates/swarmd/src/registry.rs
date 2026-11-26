@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use swarm_proto::{
-    paths, read_frame, write_frame, AttachMode, ClientDesc, CreateOpts, MetaUpdate, ProgramStatus, ScreenCapture,
+    paths, read_frame, write_frame, AttachMode, MAX_FRAME_LEN, ClientDesc, CreateOpts, MetaUpdate, ProgramStatus, ScreenCapture,
     SessionEvent, SessionId, SessionInfo, ShimMsg, ShimRequest, ShimUpgrade, ShimUpgradeOutcome, Size,
 };
 use tokio::net::UnixStream;
@@ -605,41 +605,61 @@ impl Registry {
         .await
     }
 
-    /// Lines with `opts.text` in each session's output; sessions without a
-    /// match, or whose shim can't search (an older build), are left out.
-    pub async fn search(self: &Arc<Self>, opts: swarm_proto::SearchOpts) -> Vec<swarm_proto::SessionHits> {
+    /// Lines with `opts.text` in each session's output, and the sessions that
+    /// couldn't be searched (an older shim, too slow) with why. A few shims
+    /// search at a time; each reads up to 64 MB.
+    pub async fn search(self: &Arc<Self>, opts: swarm_proto::SearchOpts) -> Result<swarm_proto::SearchResults> {
+        let opts = opts.checked().map_err(|e| anyhow::anyhow!(e))?;
+        let deadline = tokio::time::Instant::now() + SEARCH_TIMEOUT;
+        let at_once = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8);
+        let slots = Arc::new(tokio::sync::Semaphore::new(at_once));
         let mut asks = tokio::task::JoinSet::new();
         for info in self.list() {
             let opts = opts.clone();
             let this = self.clone();
+            let slots = slots.clone();
             asks.spawn(async move {
                 let this = &this;
-                let found = timed(SEARCH_TIMEOUT, async {
+                let found = tokio::time::timeout_at(deadline, async {
+                    let _slot = slots.acquire().await?;
                     let mut stream = this.connect(&info.id).await?;
                     write_frame(&mut stream, &ShimRequest::Search(opts)).await?;
                     match read_frame::<_, ShimMsg>(&mut stream).await? {
                         Some(ShimMsg::Found { hits, total }) => Ok((hits, total)),
                         Some(ShimMsg::Err(e)) => bail!("{e}"),
-                        None => bail!("its shim is from an older build that doesn't support this"),
+                        None => bail!("its shim is from an older build that can't search"),
                         other => bail!("unexpected reply {other:?}"),
                     }
                 })
-                .await;
-                match found {
-                    Ok((hits, total)) if total > 0 => Some(swarm_proto::SessionHits { id: info.id, hits, total }),
-                    Ok(_) => None,
-                    Err(e) => {
-                        tracing::debug!(id = info.id, "search: {e:#}");
-                        None
-                    }
-                }
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("the search took too long")));
+                (info.id, found)
             });
         }
-        let mut found = Vec::new();
+        let mut results = swarm_proto::SearchResults::default();
+        // The answer must fit in a frame: past this much text, sessions are
+        // left out (and said so).
+        let mut room = MAX_FRAME_LEN / 2;
         while let Some(done) = asks.join_next().await {
-            found.extend(done.ok().flatten());
+            let Ok((id, found)) = done else { continue };
+            match found {
+                Ok((hits, total)) if total > 0 => {
+                    let size: usize = hits.iter().map(|h| h.line.len() + 32).sum::<usize>() + 64;
+                    if size > room {
+                        results.skipped.push((id, "too many matching lines to send".into()));
+                        continue;
+                    }
+                    room -= size;
+                    results.found.push(swarm_proto::SessionHits { id, hits, total });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(id, "search: {e:#}");
+                    results.skipped.push((id, format!("{e:#}")));
+                }
+            }
         }
-        found
+        Ok(results)
     }
 
     pub async fn info(&self, id: &str) -> Result<SessionInfo> {
@@ -727,7 +747,14 @@ impl Registry {
                 {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                r => return r.with_context(|| format!("no session {id}")),
+                r => {
+                    let stream = r.with_context(|| format!("no session {id}"))?;
+                    // Only a shim of ours: the folder is private, but check.
+                    match stream.peer_cred() {
+                        Ok(cred) if cred.uid() == paths::uid() => return Ok(stream),
+                        other => bail!("session {id}'s socket belongs to someone else ({other:?})"),
+                    }
+                }
             }
         }
     }

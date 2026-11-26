@@ -385,7 +385,7 @@ impl Client {
     }
 
     /// Lines with `opts.text` in each session's output, for sessions with a match.
-    pub async fn search(&self, opts: swarm_proto::SearchOpts) -> Result<Vec<swarm_proto::SessionHits>> {
+    pub async fn search(&self, opts: swarm_proto::SearchOpts) -> Result<swarm_proto::SearchResults> {
         match self.request(Request::Search(opts)).await? {
             Response::Found(found) => Ok(found),
             other => bail!("unexpected {other:?}"),
@@ -594,27 +594,72 @@ async fn start_local_daemon() -> Result<()> {
 
 /// Removes what a terminal sends in answer to queries (device attributes,
 /// cursor position and mode reports, OSC color, DCS and APC replies such as
-/// the answer to a kitty graphics check) and keeps
-/// everything the user typed.
+/// the answer to a kitty graphics check) and keeps everything the user typed.
+/// One read at a time; [`ReplyFilter`] also catches a reply split across reads.
 pub fn strip_terminal_responses(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len());
-    let mut i = 0;
-    while i < data.len() {
-        if data[i] == 0x1b {
-            if let Some(len) = response_len(&data[i..]) {
-                i += len;
-                continue;
-            }
-        }
-        out.push(data[i]);
-        i += 1;
-    }
+    let mut f = ReplyFilter::default();
+    let mut out = f.push(data);
+    out.extend(f.flush());
     out
 }
 
-/// Length of the terminal response starting at `s[0] == ESC`, if it is one.
-fn response_len(s: &[u8]) -> Option<usize> {
-    match s.get(1)? {
+/// [`strip_terminal_responses`] over a stream of reads: a reply cut off at the
+/// end of a read is held until the next one (or [`Self::flush`], when the
+/// guard ends: then it was typing after all).
+#[derive(Default)]
+pub struct ReplyFilter {
+    carry: Vec<u8>,
+}
+
+/// Longest unfinished reply held back; anything longer is typing.
+const REPLY_CARRY_MAX: usize = 4096;
+
+enum Reply {
+    Whole(usize),
+    Unfinished,
+    No,
+}
+
+impl ReplyFilter {
+    pub fn push(&mut self, data: &[u8]) -> Vec<u8> {
+        let mut buf = std::mem::take(&mut self.carry);
+        buf.extend_from_slice(data);
+        let mut out = Vec::with_capacity(buf.len());
+        let mut i = 0;
+        while i < buf.len() {
+            if buf[i] == 0x1b {
+                match reply_at(&buf[i..]) {
+                    Reply::Whole(len) => {
+                        i += len;
+                        continue;
+                    }
+                    Reply::Unfinished if buf.len() - i <= REPLY_CARRY_MAX => {
+                        self.carry = buf[i..].to_vec();
+                        return out;
+                    }
+                    _ => {}
+                }
+            }
+            out.push(buf[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// What's held back, as typed.
+    pub fn flush(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.carry)
+    }
+
+    pub fn is_holding(&self) -> bool {
+        !self.carry.is_empty()
+    }
+}
+
+/// Whether `s` (with `s[0] == ESC`) starts with a terminal reply.
+fn reply_at(s: &[u8]) -> Reply {
+    let Some(&kind) = s.get(1) else { return Reply::Unfinished };
+    match kind {
         b'[' => {
             // CSI [?>=]params [$] final, where the final marks a report:
             // c (DA), R (CPR), n (DSR), y (DECRPM), t (window ops), u (kitty keys).
@@ -629,10 +674,10 @@ fn response_len(s: &[u8]) -> Option<usize> {
             if s.get(j) == Some(&b'$') {
                 j += 1;
             }
-            let fin = *s.get(j)?;
+            let Some(&fin) = s.get(j) else { return Reply::Unfinished };
             let report = matches!(fin, b'c' | b'n' | b'y' | b't' | b'R') || (private && fin == b'u');
             // A bare ESC [ R would be a key, not a report.
-            (report && j > 2).then_some(j + 1)
+            if report && j > 2 { Reply::Whole(j + 1) } else { Reply::No }
         }
         // OSC, DCS and APC replies, terminated by BEL or ST. A replayed kitty
         // graphics check is answered with `ESC _ G i=31;OK ESC \`; zsh reads
@@ -641,16 +686,20 @@ fn response_len(s: &[u8]) -> Option<usize> {
             let mut j = 2;
             while j < s.len() {
                 if s[j] == 0x07 {
-                    return Some(j + 1);
+                    return Reply::Whole(j + 1);
                 }
-                if s[j] == 0x1b && s.get(j + 1) == Some(&b'\\') {
-                    return Some(j + 2);
+                if s[j] == 0x1b {
+                    return match s.get(j + 1) {
+                        Some(b'\\') => Reply::Whole(j + 2),
+                        None => Reply::Unfinished,
+                        Some(_) => Reply::No,
+                    };
                 }
                 j += 1;
             }
-            None
+            Reply::Unfinished
         }
-        _ => None,
+        _ => Reply::No,
     }
 }
 
@@ -798,6 +847,28 @@ mod filter_tests {
         assert_eq!(strip(b"\x1bP>|xterm(390)\x1b\\z"), b"z");
         assert_eq!(strip(b"\x1b[?2004;1$yq"), b"q");
         assert_eq!(strip(b"\x1b_Gi=31;OK\x1b\\w"), b"w");
+    }
+
+    #[test]
+    fn a_reply_split_across_reads_is_dropped() {
+        let mut f = super::ReplyFilter::default();
+        assert_eq!(f.push(b"a\x1b_Gi=31"), b"a");
+        assert!(f.is_holding());
+        assert_eq!(f.push(b";OK\x1b"), b"");
+        assert_eq!(f.push(b"\\b\x1b[24;8"), b"b");
+        assert_eq!(f.push(b"0Rc"), b"c");
+        assert!(!f.is_holding());
+    }
+
+    #[test]
+    fn held_keys_come_back_when_the_guard_ends() {
+        let mut f = super::ReplyFilter::default();
+        // Escape pressed alone: held, in case a reply follows, then typed.
+        assert_eq!(f.push(b"\x1b"), b"");
+        assert_eq!(f.flush(), b"\x1b");
+        // Alt-[ then a letter that isn't a report.
+        assert_eq!(f.push(b"\x1b["), b"");
+        assert_eq!(f.push(b"A"), b"\x1b[A");
     }
 
     fn filter_all(chunks: &[&[u8]]) -> Vec<u8> {

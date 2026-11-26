@@ -660,28 +660,41 @@ impl Session {
 
     /// Lines of output with `opts.text`, from spilled output and the
     /// in-memory buffer: the most recent [`crate::find::MAX_SEARCHED`] bytes.
-    /// Blocks while it reads and decrypts spilled output.
-    pub fn search(&self, opts: &swarm_proto::SearchOpts) -> (Vec<swarm_proto::SearchHit>, u64) {
-        let (spill, ring_start, ring) = {
+    /// Blocks while it reads and decrypts spilled output; gives up at
+    /// `deadline` (whoever asked has stopped waiting by then).
+    pub fn search(
+        &self,
+        opts: &swarm_proto::SearchOpts,
+        deadline: std::time::Instant,
+    ) -> Result<(Vec<swarm_proto::SearchHit>, u64), String> {
+        let (spill, ring_start, end, ring) = {
             let inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let start = inner.ring.start();
-            (inner.spill.clone(), start, inner.ring.slice(start, inner.ring.end()).unwrap_or_default())
+            let (start, end) = (inner.ring.start(), inner.ring.end());
+            let from = end.saturating_sub(crate::find::MAX_SEARCHED).max(start);
+            (inner.spill.clone(), start, end, inner.ring.slice(from, end).unwrap_or_default())
         };
-        let end = ring_start + ring.len() as u64;
         let from = end.saturating_sub(crate::find::MAX_SEARCHED);
         let mut finder = crate::find::Finder::new(opts, from);
+        // Fed a piece at a time, looking at the clock in between.
+        const STEP: usize = 1024 * 1024;
+        let feed = |finder: &mut crate::find::Finder, at: u64, bytes: &[u8]| -> Result<(), String> {
+            for (i, piece) in bytes.chunks(STEP).enumerate() {
+                if std::time::Instant::now() >= deadline {
+                    return Err("the search took too long".into());
+                }
+                finder.feed(at + (i * STEP) as u64, piece);
+            }
+            Ok(())
+        };
         if let Some(spill) = spill.filter(|_| from < ring_start) {
-            for piece in spill.pieces(ring_start) {
+            for piece in spill.pieces_between(from, ring_start) {
                 let Some((start, bytes)) = spill.read(&piece, ring_start) else { continue };
                 let skip = from.saturating_sub(start).min(bytes.len() as u64) as usize;
-                if skip < bytes.len() {
-                    finder.feed(start + skip as u64, &bytes[skip..]);
-                }
+                feed(&mut finder, start + skip as u64, &bytes[skip..])?;
             }
         }
-        let skip = from.saturating_sub(ring_start) as usize;
-        finder.feed(ring_start + skip as u64, &ring[skip..]);
-        finder.finish()
+        feed(&mut finder, end - ring.len() as u64, &ring)?;
+        Ok(finder.finish())
     }
 
     /// The screen as the terminal model has it now.

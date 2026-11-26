@@ -45,8 +45,12 @@ where
     if len > MAX_FRAME_LEN {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
     }
-    let mut body = vec![0u8; len];
-    r.read_exact(&mut body).await?;
+    // Grown as the bytes come, not all at once from the length alone.
+    let mut body = Vec::with_capacity(len.min(64 * 1024));
+    (&mut *r).take(len as u64).read_to_end(&mut body).await?;
+    if body.len() < len {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "frame cut short"));
+    }
     postcard::from_bytes(&body)
         .map(Some)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -92,5 +96,15 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert!(read_frame::<_, ClientMsg>(&mut b).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_frame_cut_short_is_an_error() {
+        let (mut a, mut b) = tokio::io::duplex(1024);
+        a.write_all(&(1_000_000u32).to_be_bytes()).await.unwrap();
+        a.write_all(b"abc").await.unwrap();
+        drop(a);
+        let err = read_frame::<_, ClientMsg>(&mut b).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 }

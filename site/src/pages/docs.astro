@@ -231,7 +231,8 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
       <p>
         Find in All Sessions (⇧⌘F) and <code>swarmctl grep</code> search the most recent 64 MB of each session's
         output, what's on disk included. The search runs in each session's own process, so the output never leaves
-        the host it's on; only the matching lines do.
+        the host it's on; only the matching lines do. The app keeps them for five minutes and doesn't log what you
+        searched for.
       </p>
       <pre class="term"><span class="p">$</span> swarmctl dump build &gt; build.log      <span class="d"># all kept output, as text</span>
 <span class="p">$</span> swarmctl dump build --raw            <span class="d"># with escape codes</span></pre>
@@ -271,7 +272,7 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
           <tr><td><code>swarmctl wait -s agent --until blocked,done</code></td><td>Wait until a program needs you or finishes.</td></tr>
           <tr><td><code>swarmctl agents install</code></td><td>Have Claude Code and Codex report when they're working, waiting for you or done (see <a href="#program-status">Program status</a>). <code>status</code> and <code>uninstall</code> too.</td></tr>
           <tr><td><code>swarmctl ports</code></td><td>TCP ports that programs in sessions listen on, such as a development server, with the program and whether it listens on localhost only. <code>-s</code> for one session. In the app, Go to Anything (⌘P) offers to open them, forwarding the port first when the session is on another host.</td></tr>
-          <tr><td><code>swarmctl grep 'disk full'</code></td><td>Find text in every session's output, output kept on disk included: the matching lines, newest first, under their session. Ignores case unless the text has a capital letter (<code>-i</code> and <code>-S</code> choose). <code>-s</code> for one session, <code>--max</code> for how many lines per session. Exits 1 when nothing matches.</td></tr>
+          <tr><td><code>swarmctl grep 'disk full'</code></td><td>Find text in every session's output, output kept on disk included: the matching lines, newest first, under their session. Ignores case unless the text has a capital letter (<code>-i</code> and <code>-S</code> choose). <code>-s</code> for one session, <code>--max</code> for how many lines per session (up to 1,000). Exits 1 when nothing matches, 2 when some sessions couldn't be searched (they're named).</td></tr>
           <tr><td><code>swarmctl events</code></td><td>Print changes as they happen: sessions created, exited or renamed, status, bells and notifications. One JSON object per line with <code>--json</code>.</td></tr>
         </tbody>
       </table>

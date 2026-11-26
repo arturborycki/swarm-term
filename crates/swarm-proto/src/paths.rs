@@ -184,7 +184,9 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("tmp");
-    let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&tmp)?;
+    // Created new, so a file or symlink put there isn't written through.
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&tmp)?;
     let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
     f.write_all(bytes)?;
     std::fs::rename(&tmp, path)

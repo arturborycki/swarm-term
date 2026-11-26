@@ -16,6 +16,8 @@ use tokio::sync::{broadcast, mpsc, Notify};
 use crate::registry::Registry;
 
 const OUTBOUND_QUEUE: usize = 1024;
+/// Requests one client may have running at once.
+const MAX_REQUESTS_IN_FLIGHT: usize = 64;
 
 pub struct Server {
     pub registry: Arc<Registry>,
@@ -100,6 +102,7 @@ impl Server {
         let mut streams: HashMap<StreamId, mpsc::Sender<ShimInput>> = HashMap::new();
         let mut next_stream: StreamId = 1;
         let mut tasks = Vec::new();
+        let in_flight = Arc::new(tokio::sync::Semaphore::new(MAX_REQUESTS_IN_FLIGHT));
         let mut subscribed = false;
         let mut status_subscribed = false;
 
@@ -205,9 +208,14 @@ impl Server {
                     }));
                 }
                 ClientMsg::Request { id, req } => {
+                    // At most this many requests at once per client; reading
+                    // more waits. Finished ones aren't kept.
+                    let Ok(slot) = in_flight.clone().acquire_owned().await else { break };
+                    tasks.retain(|t| !t.is_finished());
                     let this = self.clone();
                     let out = out_tx.clone();
                     tasks.push(tokio::spawn(async move {
+                        let _slot = slot;
                         let result = this.request(req).await.map_err(|e| format!("{e:#}"));
                         let _ = out.send(ServerMsg::Response { id, result }).await;
                     }));
@@ -262,7 +270,7 @@ impl Server {
                 let sessions = r.list();
                 Response::Ports(tokio::task::spawn_blocking(move || crate::ports::session_ports(&sessions)).await?)
             }
-            Request::Search(opts) => Response::Found(r.search(opts).await),
+            Request::Search(opts) => Response::Found(r.search(opts).await?),
             Request::ClearStatus { id } => {
                 r.clear_status(&id).await?;
                 Response::Ok

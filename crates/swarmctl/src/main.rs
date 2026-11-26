@@ -608,17 +608,26 @@ async fn run(cli: Cli) -> Result<i32> {
                 (_, true) => Some(true),
                 _ => None,
             };
-            let opts = SearchOpts { text, case_sensitive, max_hits: max.max(1) };
-            let mut found = client.search(opts).await.map_err(|e| older_daemon(&client, e))?;
+            let opts = SearchOpts { text, case_sensitive, max_hits: max.clamp(1, swarm_proto::MAX_SEARCH_HITS) };
+            let results = client.search(opts).await.map_err(|e| older_daemon(&client, e))?;
+            let (mut found, mut skipped) = (results.found, results.skipped);
             let sessions = client.list().await?;
             if let Some(q) = session {
                 let s = resolve(&sessions, &q).map_err(|e| Exit(EXIT_NOT_FOUND, format!("{e:#}")))?;
                 found.retain(|f| f.id == s.id);
+                skipped.retain(|(id, _)| *id == s.id);
             }
             // Sessions with the most recent output first.
             let last_output = |id: &str| sessions.iter().find(|s| s.id == id).map_or(0, |s| s.last_output_ms);
             found.sort_by_key(|f| std::cmp::Reverse(last_output(&f.id)));
-            let name = |id: &str| sessions.iter().find(|s| s.id == id).map(|s| s.display_name().to_string()).unwrap_or_default();
+            // Output from sessions is cleaned where it's read, but a host may
+            // run an older build: nothing that could start an escape sequence.
+            let name = |id: &str| {
+                sessions.iter().find(|s| s.id == id).map(|s| swarm_proto::clean_text(s.display_name())).unwrap_or_default()
+            };
+            for (id, why) in &skipped {
+                eprintln!("swarmctl: {} ({}) wasn't searched: {}", name(id), id.chars().take(10).collect::<String>(), swarm_proto::clean_text(why));
+            }
             if json {
                 let all: Vec<_> = found
                     .iter()
@@ -633,11 +642,12 @@ async fn run(cli: Cli) -> Result<i32> {
                     let extra = if more > 0 { format!(", {more} older not shown") } else { String::new() };
                     writeln!(out, "{} ({id_short}): {} matching line{}{extra}", name(&f.id), f.total, if f.total == 1 { "" } else { "s" })?;
                     for hit in &f.hits {
-                        writeln!(out, "  {}", hit.line)?;
+                        writeln!(out, "  {}", swarm_proto::clean_text(&hit.line))?;
                     }
                 }
             }
-            Ok(if found.is_empty() { 1 } else { 0 })
+            // As grep: 1 for no match, 2 when some sessions couldn't be searched.
+            Ok(if !found.is_empty() { 0 } else if skipped.is_empty() { 1 } else { 2 })
         }
         Cmd::Events => events(&client, json).await.map_err(|e| older_daemon(&client, e)),
         Cmd::Dump { session, raw } => {
@@ -1378,6 +1388,7 @@ async fn attach(client: &Client, id: &str, readonly: bool, live: bool) -> Result
     });
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
     let mut guard_until = Instant::now() + REPLAY_INPUT_GUARD;
+    let mut replies = swarm_client::ReplyFilter::default();
     let mut last_offset = att.replay_from;
 
     let outcome = loop {
@@ -1409,7 +1420,9 @@ async fn attach(client: &Client, id: &str, readonly: bool, live: bool) -> Result
             input = in_rx.recv() => {
                 let Some(mut data) = input else { break "stdin closed".into() };
                 if Instant::now() < guard_until {
-                    data = swarm_client::strip_terminal_responses(&data);
+                    data = replies.push(&data);
+                } else if replies.is_holding() {
+                    data = [replies.flush(), data].concat();
                 }
                 let detach_at = data.iter().position(|&b| b == DETACH_KEY);
                 if let Some(i) = detach_at {
@@ -1421,6 +1434,13 @@ async fn attach(client: &Client, id: &str, readonly: bool, live: bool) -> Result
                 if detach_at.is_some() {
                     att.detach().await?;
                     break format!("detached from {name}");
+                }
+            }
+            // The guard ended with a reply's start held: it was typing.
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(guard_until)), if replies.is_holding() => {
+                let held = replies.flush();
+                if !readonly {
+                    att.input(held).await?;
                 }
             }
             _ = winch.recv() => {
