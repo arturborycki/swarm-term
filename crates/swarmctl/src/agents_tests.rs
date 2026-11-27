@@ -128,3 +128,22 @@ fn agents_not_installed_are_skipped() {
 fn shell_join_quotes_paths_with_spaces() {
     assert_eq!(shell_join(&["/a b/swarmctl".into(), "agent-hook".into()]), "'/a b/swarmctl' agent-hook");
 }
+
+#[test]
+fn install_keeps_the_mode_and_the_symlink() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = temp_home("mode");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::create_dir_all(home.join("dotfiles")).unwrap();
+    let real = home.join("dotfiles/settings.json");
+    std::fs::write(&real, "{}\n").unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let link = home.join(".claude/settings.json");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    install(&paths(&home), Path::new(EXE)).unwrap();
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays a link");
+    assert!(std::fs::read_to_string(&real).unwrap().contains("agent-hook"), "the file it points to is updated");
+    assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+    let _ = std::fs::remove_dir_all(&home);
+}

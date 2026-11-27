@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use swarm_proto::{
-    paths, read_frame, write_frame, AttachMode, ClientDesc, CreateOpts, MetaUpdate, ProgramStatus, ScreenCapture,
+    paths, read_frame, write_frame, AttachMode, MAX_FRAME_LEN, ClientDesc, CreateOpts, MetaUpdate, ProgramStatus, ScreenCapture,
     SessionEvent, SessionId, SessionInfo, ShimMsg, ShimRequest, ShimUpgrade, ShimUpgradeOutcome, Size,
 };
 use tokio::net::UnixStream;
@@ -19,6 +19,9 @@ use tokio::sync::broadcast;
 
 /// How long a shim may take to answer a request.
 const SHIM_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a shim may take to search its output (decrypting spilled output included).
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// For requests that wait for the session's process (`Remove`) or start a
 /// program (`Upgrade`).
 const SHIM_SLOW_TIMEOUT: Duration = Duration::from_secs(20);
@@ -430,8 +433,10 @@ impl Registry {
                 "its shim predates in-place updates; it moves to the new build when the session is restarted".into(),
             );
         };
-        // Sessions move to this daemon's `swarm-shim` program, never to one
-        // older than they run (a half-finished install).
+        // Sessions on any other build move to this daemon's `swarm-shim`,
+        // which is installed with it, so they match the daemon. A shim
+        // program too old to say its build (a half-finished install) isn't
+        // used.
         let Some(target) = &self.shim_build else {
             return ShimUpgradeOutcome::Skipped(format!(
                 "{} is from an older build than this daemon; the session stays on its shim",
@@ -602,6 +607,63 @@ impl Registry {
         .await
     }
 
+    /// Lines with `opts.text` in each session's output, and the sessions that
+    /// couldn't be searched (an older shim, too slow) with why. A few shims
+    /// search at a time; each reads up to 64 MB.
+    pub async fn search(self: &Arc<Self>, opts: swarm_proto::SearchOpts) -> Result<swarm_proto::SearchResults> {
+        let opts = opts.checked().map_err(|e| anyhow::anyhow!(e))?;
+        let deadline = tokio::time::Instant::now() + SEARCH_TIMEOUT;
+        let at_once = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8);
+        let slots = Arc::new(tokio::sync::Semaphore::new(at_once));
+        let mut asks = tokio::task::JoinSet::new();
+        for info in self.list() {
+            let opts = opts.clone();
+            let this = self.clone();
+            let slots = slots.clone();
+            asks.spawn(async move {
+                let this = &this;
+                let found = tokio::time::timeout_at(deadline, async {
+                    let _slot = slots.acquire().await?;
+                    let mut stream = this.connect(&info.id).await?;
+                    write_frame(&mut stream, &ShimRequest::Search(opts)).await?;
+                    match read_frame::<_, ShimMsg>(&mut stream).await? {
+                        Some(ShimMsg::Found { hits, total }) => Ok((hits, total)),
+                        Some(ShimMsg::Err(e)) => bail!("{e}"),
+                        None => bail!("its shim is from an older build that can't search"),
+                        other => bail!("unexpected reply {other:?}"),
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("the search took too long")));
+                (info.id, found)
+            });
+        }
+        let mut results = swarm_proto::SearchResults::default();
+        // The answer must fit in a frame: past this much text, sessions are
+        // left out (and said so).
+        let mut room = MAX_FRAME_LEN / 2;
+        while let Some(done) = asks.join_next().await {
+            let Ok((id, found)) = done else { continue };
+            match found {
+                Ok((hits, total)) if total > 0 => {
+                    let size: usize = hits.iter().map(|h| h.line.len() + 32).sum::<usize>() + 64;
+                    if size > room {
+                        results.skipped.push((id, "too many matching lines to send".into()));
+                        continue;
+                    }
+                    room -= size;
+                    results.found.push(swarm_proto::SessionHits { id, hits, total });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(id, "search: {e:#}");
+                    results.skipped.push((id, format!("{e:#}")));
+                }
+            }
+        }
+        Ok(results)
+    }
+
     pub async fn info(&self, id: &str) -> Result<SessionInfo> {
         timed(SHIM_TIMEOUT, async {
             let mut stream = self.connect(id).await?;
@@ -687,7 +749,14 @@ impl Registry {
                 {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                r => return r.with_context(|| format!("no session {id}")),
+                r => {
+                    let stream = r.with_context(|| format!("no session {id}"))?;
+                    // Only a shim of ours: the folder is private, but check.
+                    match stream.peer_cred() {
+                        Ok(cred) if cred.uid() == paths::uid() => return Ok(stream),
+                        other => bail!("session {id}'s socket belongs to someone else ({other:?})"),
+                    }
+                }
             }
         }
     }

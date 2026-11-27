@@ -22,7 +22,7 @@ fn home() -> Result<PathBuf> {
 }
 
 fn exe() -> Result<PathBuf> {
-    Ok(std::env::current_exe()?.canonicalize()?)
+    Ok(swarm_proto::paths::stable_exe(&std::env::current_exe()?.canonicalize()?))
 }
 
 /// Runs a command and fails with its stderr if it doesn't succeed.

@@ -16,7 +16,12 @@ const shots = Object.entries(
     return { src: mod.default, label: caption?.label ?? file, alt: caption?.alt ?? '' };
   });
 import StarLink from '../components/StarLink.astro';
-import { APP_REPO, DMG, REPO, REPO_PUBLIC, VERSION, linuxTarball } from '../site';
+import { APP_REPO, DMG, LINUX_SHA256_X86_64, REPO, REPO_PUBLIC, VERSION, linuxTarball } from '../site';
+const tarballName = `swarmd-${VERSION}-linux-x86_64.tar.gz`;
+// Checks the archive against its published checksum before unpacking it.
+const installCmd =
+  `mkdir -p ~/.local/share/swarm/bin && cd ~/.local/share/swarm/bin && curl -fsSLO ${linuxTarball('x86_64')}` +
+  ` && echo "${LINUX_SHA256_X86_64}  ${tarballName}" | sha256sum -c - && tar -xzf ${tarballName} && rm ${tarballName}`;
 
 const features = [
   {
@@ -271,8 +276,8 @@ const faqPage = {
           </div>
           <div class="cmd small">
             <span class="prompt">$</span>
-            <code>curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin</code>
-            <button class="copy" data-copy={`mkdir -p ~/.local/share/swarm/bin && curl -fsSL ${linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin`}>copy</button>
+            <code>{installCmd}</code>
+            <button class="copy" data-copy={installCmd}>copy</button>
           </div>
           <a class="more" href="/docs/#server-install">Install instructions and checksums →</a>
         </article>

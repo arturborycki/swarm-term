@@ -21,6 +21,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 pub use swarm_proto;
+pub use swarm_proto::ForgedTimeFilter;
 
 /// What an attachment receives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +117,10 @@ impl Client {
                 "-T",
                 "-o",
                 "BatchMode=yes",
+                // A host that doesn't answer fails in seconds, not after the
+                // system's TCP timeout (a minute or more).
+                "-o",
+                "ConnectTimeout=10",
                 "-o",
                 "ServerAliveInterval=10",
                 "-o",
@@ -233,10 +238,15 @@ impl Client {
                         s.send_stream(stream, StreamEvent::Closed { reason }, true);
                     }
                     ServerMsg::Event(ev) => {
+                        let ev = match ev {
+                            SessionEvent::Created(i) => SessionEvent::Created(i.cleaned()),
+                            SessionEvent::Updated(i) => SessionEvent::Updated(i.cleaned()),
+                            other => other,
+                        };
                         let _ = s.events.send(ev);
                     }
                     ServerMsg::Status { id, status } => {
-                        let _ = s.status_events.send((id, status));
+                        let _ = s.status_events.send((id, status.cleaned()));
                     }
                     ServerMsg::Welcome { .. } => {}
                 }
@@ -294,14 +304,14 @@ impl Client {
 
     pub async fn list(&self) -> Result<Vec<SessionInfo>> {
         match self.request(Request::List).await? {
-            Response::Sessions(v) => Ok(v),
+            Response::Sessions(v) => Ok(v.into_iter().map(SessionInfo::cleaned).collect()),
             other => bail!("unexpected {other:?}"),
         }
     }
 
     pub async fn create(&self, opts: CreateOpts) -> Result<SessionInfo> {
         match self.request(Request::Create(opts)).await? {
-            Response::Session(s) => Ok(s),
+            Response::Session(s) => Ok(s.cleaned()),
             other => bail!("unexpected {other:?}"),
         }
     }
@@ -316,7 +326,7 @@ impl Client {
 
     pub async fn set_meta(&self, id: &str, update: MetaUpdate) -> Result<SessionInfo> {
         match self.request(Request::SetMeta { id: id.into(), update }).await? {
-            Response::Session(s) => Ok(s),
+            Response::Session(s) => Ok(s.cleaned()),
             other => bail!("unexpected {other:?}"),
         }
     }
@@ -371,7 +381,7 @@ impl Client {
     /// status for sessions that reported nothing).
     pub async fn status(&self) -> Result<Vec<(SessionId, ProgramStatus)>> {
         match self.request(Request::Status).await? {
-            Response::Statuses(s) => Ok(s),
+            Response::Statuses(s) => Ok(s.into_iter().map(|(id, st)| (id, st.cleaned())).collect()),
             other => bail!("unexpected {other:?}"),
         }
     }
@@ -380,6 +390,14 @@ impl Client {
     pub async fn ports(&self) -> Result<Vec<(SessionId, Vec<ListeningPort>)>> {
         match self.request(Request::Ports).await? {
             Response::Ports(p) => Ok(p),
+            other => bail!("unexpected {other:?}"),
+        }
+    }
+
+    /// Lines with `opts.text` in each session's output, for sessions with a match.
+    pub async fn search(&self, opts: swarm_proto::SearchOpts) -> Result<swarm_proto::SearchResults> {
+        match self.request(Request::Search(opts)).await? {
+            Response::Found(found) => Ok(found),
             other => bail!("unexpected {other:?}"),
         }
     }
@@ -585,27 +603,73 @@ async fn start_local_daemon() -> Result<()> {
 // Replay hygiene
 
 /// Removes what a terminal sends in answer to queries (device attributes,
-/// cursor position and mode reports, OSC color and DCS replies) and keeps
-/// everything the user typed.
+/// cursor position and mode reports, OSC color, DCS and APC replies such as
+/// the answer to a kitty graphics check) and keeps everything the user typed.
+/// One read at a time; [`ReplyFilter`] also catches a reply split across reads.
 pub fn strip_terminal_responses(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len());
-    let mut i = 0;
-    while i < data.len() {
-        if data[i] == 0x1b {
-            if let Some(len) = response_len(&data[i..]) {
-                i += len;
-                continue;
-            }
-        }
-        out.push(data[i]);
-        i += 1;
-    }
+    let mut f = ReplyFilter::default();
+    let mut out = f.push(data);
+    out.extend(f.flush());
     out
 }
 
-/// Length of the terminal response starting at `s[0] == ESC`, if it is one.
-fn response_len(s: &[u8]) -> Option<usize> {
-    match s.get(1)? {
+/// [`strip_terminal_responses`] over a stream of reads: a reply cut off at the
+/// end of a read is held until the next one (or [`Self::flush`], when the
+/// guard ends: then it was typing after all).
+#[derive(Default)]
+pub struct ReplyFilter {
+    carry: Vec<u8>,
+}
+
+/// Longest unfinished reply held back; anything longer is typing.
+const REPLY_CARRY_MAX: usize = 4096;
+
+enum Reply {
+    Whole(usize),
+    Unfinished,
+    No,
+}
+
+impl ReplyFilter {
+    pub fn push(&mut self, data: &[u8]) -> Vec<u8> {
+        let mut buf = std::mem::take(&mut self.carry);
+        buf.extend_from_slice(data);
+        let mut out = Vec::with_capacity(buf.len());
+        let mut i = 0;
+        while i < buf.len() {
+            if buf[i] == 0x1b {
+                match reply_at(&buf[i..]) {
+                    Reply::Whole(len) => {
+                        i += len;
+                        continue;
+                    }
+                    Reply::Unfinished if buf.len() - i <= REPLY_CARRY_MAX => {
+                        self.carry = buf[i..].to_vec();
+                        return out;
+                    }
+                    _ => {}
+                }
+            }
+            out.push(buf[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// What's held back, as typed.
+    pub fn flush(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.carry)
+    }
+
+    pub fn is_holding(&self) -> bool {
+        !self.carry.is_empty()
+    }
+}
+
+/// Whether `s` (with `s[0] == ESC`) starts with a terminal reply.
+fn reply_at(s: &[u8]) -> Reply {
+    let Some(&kind) = s.get(1) else { return Reply::Unfinished };
+    match kind {
         b'[' => {
             // CSI [?>=]params [$] final, where the final marks a report:
             // c (DA), R (CPR), n (DSR), y (DECRPM), t (window ops), u (kitty keys).
@@ -620,26 +684,32 @@ fn response_len(s: &[u8]) -> Option<usize> {
             if s.get(j) == Some(&b'$') {
                 j += 1;
             }
-            let fin = *s.get(j)?;
+            let Some(&fin) = s.get(j) else { return Reply::Unfinished };
             let report = matches!(fin, b'c' | b'n' | b'y' | b't' | b'R') || (private && fin == b'u');
             // A bare ESC [ R would be a key, not a report.
-            (report && j > 2).then_some(j + 1)
+            if report && j > 2 { Reply::Whole(j + 1) } else { Reply::No }
         }
-        // OSC and DCS replies, terminated by BEL or ST.
-        b']' | b'P' => {
+        // OSC, DCS and APC replies, terminated by BEL or ST. A replayed kitty
+        // graphics check is answered with `ESC _ G i=31;OK ESC \`; zsh reads
+        // `ESC _` as insert-last-word and the rest as typing.
+        b']' | b'P' | b'_' => {
             let mut j = 2;
             while j < s.len() {
                 if s[j] == 0x07 {
-                    return Some(j + 1);
+                    return Reply::Whole(j + 1);
                 }
-                if s[j] == 0x1b && s.get(j + 1) == Some(&b'\\') {
-                    return Some(j + 2);
+                if s[j] == 0x1b {
+                    return match s.get(j + 1) {
+                        Some(b'\\') => Reply::Whole(j + 2),
+                        None => Reply::Unfinished,
+                        Some(_) => Reply::No,
+                    };
                 }
                 j += 1;
             }
-            None
+            Reply::Unfinished
         }
-        _ => None,
+        _ => Reply::No,
     }
 }
 
@@ -771,6 +841,17 @@ mod host_tests {
 
 #[cfg(test)]
 mod filter_tests {
+    #[test]
+    fn a_program_cannot_send_swarm_time() {
+        let mut f = swarm_proto::ForgedTimeFilter::default();
+        let mut out = f.push(b"a\x1b]1337;SwarmTime=\x07b\x1b]1337;Swa");
+        out.extend(f.push(b"rmTime=5\x07c\x1b[0m"));
+        out.extend(f.finish());
+        assert_eq!(out, b"a\x1b]1337;SwarmTime-forged=\x07b\x1b]1337;SwarmTime-forged=5\x07c\x1b[0m");
+        assert_eq!(f.push(b"x\x1b]1"), b"x");
+        assert_eq!(f.finish(), b"\x1b]1");
+    }
+
     use super::strip_terminal_responses as strip;
     use super::EolMarkFilter;
 
@@ -786,6 +867,29 @@ mod filter_tests {
         assert_eq!(strip(b"x\x1b]11;rgb:0000/0000/0000\x07y"), b"xy");
         assert_eq!(strip(b"\x1bP>|xterm(390)\x1b\\z"), b"z");
         assert_eq!(strip(b"\x1b[?2004;1$yq"), b"q");
+        assert_eq!(strip(b"\x1b_Gi=31;OK\x1b\\w"), b"w");
+    }
+
+    #[test]
+    fn a_reply_split_across_reads_is_dropped() {
+        let mut f = super::ReplyFilter::default();
+        assert_eq!(f.push(b"a\x1b_Gi=31"), b"a");
+        assert!(f.is_holding());
+        assert_eq!(f.push(b";OK\x1b"), b"");
+        assert_eq!(f.push(b"\\b\x1b[24;8"), b"b");
+        assert_eq!(f.push(b"0Rc"), b"c");
+        assert!(!f.is_holding());
+    }
+
+    #[test]
+    fn held_keys_come_back_when_the_guard_ends() {
+        let mut f = super::ReplyFilter::default();
+        // Escape pressed alone: held, in case a reply follows, then typed.
+        assert_eq!(f.push(b"\x1b"), b"");
+        assert_eq!(f.flush(), b"\x1b");
+        // Alt-[ then a letter that isn't a report.
+        assert_eq!(f.push(b"\x1b["), b"");
+        assert_eq!(f.push(b"A"), b"\x1b[A");
     }
 
     fn filter_all(chunks: &[&[u8]]) -> Vec<u8> {

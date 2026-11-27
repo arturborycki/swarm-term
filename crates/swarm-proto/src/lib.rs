@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub use frame::{read_frame, write_frame, FrameReader, MAX_FRAME_LEN};
+pub use frame::{read_frame, read_frame_body, undecodable_request_id, write_frame, FrameReader, MAX_FRAME_LEN};
 
 /// Bumped on any incompatible change to the messages below.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -98,6 +98,18 @@ impl SessionInfo {
     pub fn is_running(&self) -> bool {
         matches!(self.state, SessionState::Running)
     }
+
+    /// Drops control and invisible characters from the text a program in the
+    /// session sets (title, folder, foreground name) and from the name. A
+    /// current shim already cleans them; an older one, on a remote host,
+    /// may not.
+    pub fn cleaned(mut self) -> Self {
+        self.name = self.name.map(|n| clean_text(&n));
+        self.title = clean_text(&self.title);
+        self.cwd = self.cwd.map(|c| clean_text(&c));
+        self.foreground = self.foreground.map(|f| clean_text(&f));
+        self
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -179,6 +191,9 @@ pub enum Request {
     /// The TCP ports programs in each running session listen on, such as a
     /// development server started there. Answered with [`Response::Ports`].
     Ports,
+    /// Look for text in every session's scrollback, spilled output included.
+    /// Answered with [`Response::Found`].
+    Search(SearchOpts),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -200,6 +215,72 @@ pub enum Response {
     Screen(ScreenCapture),
     Statuses(Vec<(SessionId, ProgramStatus)>),
     Ports(Vec<(SessionId, Vec<ListeningPort>)>),
+    /// Sessions with a match, each with its most recent matching lines, and
+    /// those that weren't searched.
+    Found(SearchResults),
+}
+
+/// What [`Request::Search`] looks for.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SearchOpts {
+    /// Plain text, not a pattern.
+    pub text: String,
+    /// `None`: only when `text` has a capital letter (smart case).
+    pub case_sensitive: Option<bool>,
+    /// Most matching lines kept per session, the most recent ones.
+    pub max_hits: u32,
+}
+
+/// Most matching lines kept per session.
+pub const MAX_SEARCH_HITS: u32 = 1000;
+/// Longest search text, in bytes; longer text can't match a kept line anyway.
+pub const MAX_SEARCH_TEXT: usize = 1024;
+
+impl SearchOpts {
+    pub fn is_case_sensitive(&self) -> bool {
+        self.case_sensitive.unwrap_or_else(|| self.text.chars().any(char::is_uppercase))
+    }
+
+    /// Within the limits: an error for text too long to search for, and at
+    /// most [`MAX_SEARCH_HITS`] lines per session.
+    pub fn checked(mut self) -> Result<SearchOpts, String> {
+        if self.text.len() > MAX_SEARCH_TEXT {
+            return Err(format!("the text is longer than {MAX_SEARCH_TEXT} bytes"));
+        }
+        self.max_hits = self.max_hits.clamp(1, MAX_SEARCH_HITS);
+        Ok(self)
+    }
+}
+
+/// The answer to [`Request::Search`].
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchResults {
+    /// Sessions with a match.
+    pub found: Vec<SessionHits>,
+    /// Sessions that weren't searched (an older build, too slow, or the
+    /// answer was too big), with why.
+    pub skipped: Vec<(SessionId, String)>,
+}
+
+/// One line of output that matches.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SearchHit {
+    /// Where the line starts in the session's output.
+    pub offset: u64,
+    /// The line as text (escape sequences removed), shortened around the
+    /// match when it's long.
+    pub line: String,
+    /// Where the match is in `line`, in characters: start and length.
+    pub at: (u32, u32),
+}
+
+/// A session's matches, newest first.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionHits {
+    pub id: SessionId,
+    pub hits: Vec<SearchHit>,
+    /// Matching lines in all, including those not kept.
+    pub total: u64,
 }
 
 /// A TCP port a program in a session listens on.
@@ -319,6 +400,8 @@ pub enum ShimRequest {
     WatchStatus,
     /// The user has seen the session (see `Request::ClearStatus`).
     ClearStatus,
+    /// Answered with `ShimMsg::Found`.
+    Search(SearchOpts),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -344,6 +427,8 @@ pub enum ShimMsg {
     // New variants go last.
     Screen(ScreenCapture),
     Status(ProgramStatus),
+    /// Matching lines, newest first, and how many matched in all.
+    Found { hits: Vec<SearchHit>, total: u64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +565,80 @@ pub mod hex {
     }
 }
 
+/// Characters that must not reach a terminal from session output shown
+/// elsewhere (titles, search results): control characters, which can start
+/// escape sequences (C1 ones included), and invisible or direction-changing
+/// characters, which make text read differently from what it is.
+pub fn is_unsafe_char(c: char) -> bool {
+    c.is_control() && c != '\t'
+        || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
+}
+
+/// `text` without [`is_unsafe_char`] characters; a tab becomes a space.
+impl ProgramStatus {
+    /// `ProgramStatus` with the text programs report cleaned, as `SessionInfo::cleaned`.
+    pub fn cleaned(mut self) -> Self {
+        let opt = |t: Option<String>| t.map(|t| clean_text(&t));
+        for r in &mut self.records {
+            r.id = clean_text(&r.id);
+            r.app = opt(r.app.take());
+            r.title = opt(r.title.take());
+            r.msg = opt(r.msg.take());
+        }
+        if let Some(n) = &mut self.notification {
+            n.title = clean_text(&n.title);
+            n.body = clean_text(&n.body);
+        }
+        self
+    }
+}
+
+pub fn clean_text(text: &str) -> String {
+    text.chars().filter(|&c| !is_unsafe_char(c)).map(|c| if c == '\t' { ' ' } else { c }).collect()
+}
+
+/// Live output with any `OSC 1337 ; SwarmTime=` a program sent made
+/// harmless. Swarm sends that sequence itself around replayed output (the
+/// times of replayed blocks, and the end of a replay); a program printing it
+/// could otherwise fake both. The key is renamed, which terminals ignore. A
+/// possible start at the end of a chunk is held for the next one, or
+/// [`Self::finish`].
+#[derive(Default)]
+pub struct ForgedTimeFilter {
+    carry: Vec<u8>,
+}
+
+const SWARM_TIME: &[u8] = b"\x1b]1337;SwarmTime=";
+
+impl ForgedTimeFilter {
+    pub fn push(&mut self, data: &[u8]) -> Vec<u8> {
+        let mut input = std::mem::take(&mut self.carry);
+        input.extend_from_slice(data);
+        let mut out = Vec::with_capacity(input.len());
+        let mut i = 0;
+        while i < input.len() {
+            let rest = &input[i..];
+            if rest.starts_with(SWARM_TIME) {
+                out.extend_from_slice(b"\x1b]1337;SwarmTime-forged=");
+                i += SWARM_TIME.len();
+            } else if rest[0] == 0x1b && SWARM_TIME.starts_with(rest) {
+                // Cut off at the end: maybe the start of one.
+                self.carry = rest.to_vec();
+                break;
+            } else {
+                out.push(rest[0]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// What was held back.
+    pub fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.carry)
+    }
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -503,6 +662,8 @@ mod tests {
         assert_eq!(tag(postcard::to_stdvec(&Request::Shutdown).unwrap()), 8);
         assert_eq!(tag(postcard::to_stdvec(&Request::UpgradeShims { force: false }).unwrap()), 9);
         assert_eq!(tag(postcard::to_stdvec(&Request::ApplySpill).unwrap()), 10);
+        assert_eq!(tag(postcard::to_stdvec(&Request::Ports).unwrap()), 16);
+        assert_eq!(tag(postcard::to_stdvec(&ShimRequest::ClearStatus).unwrap()), 14);
         assert_eq!(tag(postcard::to_stdvec(&AttachMode::Live).unwrap()), 2);
         assert_eq!(tag(postcard::to_stdvec(&AttachMode::History).unwrap()), 3);
         assert_eq!(tag(postcard::to_stdvec(&ShimMsg::Lagged { resume_at: 0 }).unwrap()), 7);

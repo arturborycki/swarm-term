@@ -16,6 +16,8 @@ use tokio::sync::{broadcast, mpsc, Notify};
 use crate::registry::Registry;
 
 const OUTBOUND_QUEUE: usize = 1024;
+/// Requests one client may have running at once.
+const MAX_REQUESTS_IN_FLIGHT: usize = 64;
 
 pub struct Server {
     pub registry: Arc<Registry>,
@@ -100,10 +102,23 @@ impl Server {
         let mut streams: HashMap<StreamId, mpsc::Sender<ShimInput>> = HashMap::new();
         let mut next_stream: StreamId = 1;
         let mut tasks = Vec::new();
+        let in_flight = Arc::new(tokio::sync::Semaphore::new(MAX_REQUESTS_IN_FLIGHT));
         let mut subscribed = false;
         let mut status_subscribed = false;
 
-        while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+        while let Ok(Some(body)) = swarm_proto::read_frame_body(&mut rd).await {
+            let msg = match swarm_proto::frame::decode::<ClientMsg>(&body) {
+                Ok(msg) => msg,
+                // A newer client's request: answer it, keep the connection.
+                Err(_) => match swarm_proto::undecodable_request_id(&body) {
+                    Some(id) => {
+                        let why = format!("swarmd {} doesn't know this request; update it", swarm_proto::VERSION);
+                        let _ = out_tx.send(ServerMsg::Response { id, result: Err(why) }).await;
+                        continue;
+                    }
+                    None => break,
+                },
+            };
             // A connection can live for weeks (the app lists sessions every
             // few seconds): drop handles of tasks that are done.
             tasks.retain(|t: &tokio::task::JoinHandle<()>| !t.is_finished());
@@ -205,9 +220,14 @@ impl Server {
                     }));
                 }
                 ClientMsg::Request { id, req } => {
+                    // At most this many requests at once per client; reading
+                    // more waits. Finished ones aren't kept.
+                    let Ok(slot) = in_flight.clone().acquire_owned().await else { break };
+                    tasks.retain(|t| !t.is_finished());
                     let this = self.clone();
                     let out = out_tx.clone();
                     tasks.push(tokio::spawn(async move {
+                        let _slot = slot;
                         let result = this.request(req).await.map_err(|e| format!("{e:#}"));
                         let _ = out.send(ServerMsg::Response { id, result }).await;
                     }));
@@ -262,6 +282,7 @@ impl Server {
                 let sessions = r.list();
                 Response::Ports(tokio::task::spawn_blocking(move || crate::ports::session_ports(&sessions)).await?)
             }
+            Request::Search(opts) => Response::Found(r.search(opts).await?),
             Request::ClearStatus { id } => {
                 r.clear_status(&id).await?;
                 Response::Ok

@@ -81,6 +81,27 @@ pub fn shim_socket(runtime: &Path, id: &str) -> PathBuf {
     shims_dir(runtime).join(format!("{id}.sock"))
 }
 
+/// `exe` as a path that lasts: for a Homebrew install, its `opt` link
+/// (`<prefix>/opt/swarmd/bin/swarmctl`) rather than the versioned
+/// `<prefix>/Cellar/swarmd/0.1.13/bin/swarmctl`, which `brew upgrade` removes.
+/// Used for paths written into files that outlive this version (agent hooks,
+/// the login service).
+pub fn stable_exe(exe: &Path) -> PathBuf {
+    let parts: Vec<_> = exe.components().collect();
+    if let Some(i) = parts.iter().position(|c| c.as_os_str() == "Cellar") {
+        if parts.len() > i + 3 {
+            let mut opt: PathBuf = parts[..i].iter().collect();
+            opt.push("opt");
+            opt.push(parts[i + 1]);
+            opt.extend(&parts[i + 3..]);
+            if opt.exists() {
+                return opt;
+            }
+        }
+    }
+    exe.to_path_buf()
+}
+
 pub fn uid() -> u32 {
     unsafe { libc::getuid() }
 }
@@ -184,7 +205,9 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("tmp");
-    let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&tmp)?;
+    // Created new, so a file or symlink put there isn't written through.
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&tmp)?;
     let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
     f.write_all(bytes)?;
     std::fs::rename(&tmp, path)
@@ -193,6 +216,21 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_homebrew_cellar_path_becomes_its_opt_link() {
+        let base = tempfile::tempdir().unwrap();
+        let cellar = base.path().join("Cellar/swarmd/0.1.13/bin/swarmctl");
+        std::fs::create_dir_all(cellar.parent().unwrap()).unwrap();
+        std::fs::write(&cellar, "").unwrap();
+        // No opt link: the path stays as it is.
+        assert_eq!(stable_exe(&cellar), cellar);
+        std::fs::create_dir_all(base.path().join("opt")).unwrap();
+        std::os::unix::fs::symlink(base.path().join("Cellar/swarmd/0.1.13"), base.path().join("opt/swarmd")).unwrap();
+        assert_eq!(stable_exe(&cellar), base.path().join("opt/swarmd/bin/swarmctl"));
+        let app = Path::new("/Applications/Swarm.app/Contents/MacOS/swarmctl");
+        assert_eq!(stable_exe(app), app);
+    }
 
     #[test]
     fn a_folder_open_to_others_or_a_symlink_is_not_private() {

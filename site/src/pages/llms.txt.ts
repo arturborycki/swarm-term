@@ -17,6 +17,8 @@ export const GET: APIRoute = () =>
 - AI coding agents: Claude Code, Codex and similar agents started in a Swarm tab keep running when the tab closes or the app quits; on a server they also keep running while the Mac sleeps.
 - Splits and groups: sessions sit in sidebar groups (This Mac, one per host, your own); any session, local or remote, can be shown beside others in split panes.
 - Finding sessions: Go to Anything (⌘P) jumps to tabs, detached sessions and hosts, and to sessions by state ("needs you"); the Activity view (⌘.) lists sessions that need you, finished or failed; notifications and a Dock badge flag them. A Scratch Terminal (⌥⌘T) floats over every window.
+- Search: Find in All Sessions (⇧⌘F) searches every session's output (this Mac and connected hosts, detached sessions, output kept on disk) and opens the session you pick with Find on the text; swarmctl grep <text> does it from the command line.
+- tmux-style keys: optional Ctrl-B or Ctrl-A prefix keys (Settings → Keyboard Shortcuts) to split (% and "), move between panes (arrows), zoom (z), close (x), switch tabs (n, p, 1-9) and resize panes (r, then arrows).
 - Ports: a dev server in a session shows up in Go to Anything as "Open localhost:3000"; on a remote host Swarm forwards the port over ssh with your own config first. Any port can be forwarded by typing it.
 - Updates: Swarm installs its own signed updates; it can download them in the background and install them while it isn't in use (Settings → About). Help → Copy Debug Info copies versions and daemon state for bug reports.
 - Remote hosts: uses your ssh config and keys, installs swarmd on the host, reconnects after sleep or network drops.

@@ -13,6 +13,8 @@ use crate::session::Session;
 
 /// Largest output frame sent to a client.
 const REPLAY_CHUNK: usize = 64 * 1024;
+/// How long a search may wait and run: the daemon stops waiting then.
+const SEARCH_LIMIT: Duration = Duration::from_secs(20);
 
 pub async fn serve(session: Arc<Session>, listener: UnixListener, shutdown: Arc<Notify>, handoff: Arc<HandoffCtx>) {
     loop {
@@ -83,6 +85,28 @@ async fn handle(
         }
         ShimRequest::Screen => write_frame(&mut wr, &ShimMsg::Screen(session.capture())).await,
         ShimRequest::Status => write_frame(&mut wr, &ShimMsg::Status(session.program_status())).await,
+        ShimRequest::Search(opts) => {
+            let reply = match opts.checked() {
+                Err(e) => ShimMsg::Err(e),
+                Ok(opts) => {
+                    // One search at a time; each reads up to 64 MB.
+                    static ONE_AT_A_TIME: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+                    let deadline = std::time::Instant::now() + SEARCH_LIMIT;
+                    match tokio::time::timeout(SEARCH_LIMIT, ONE_AT_A_TIME.acquire()).await {
+                        Ok(Ok(_permit)) => {
+                            let s = session.clone();
+                            match tokio::task::spawn_blocking(move || s.search(&opts, deadline)).await {
+                                Ok(Ok((hits, total))) => ShimMsg::Found { hits, total },
+                                Ok(Err(e)) => ShimMsg::Err(e),
+                                Err(e) => ShimMsg::Err(format!("search failed: {e}")),
+                            }
+                        }
+                        _ => ShimMsg::Err("busy with other searches".into()),
+                    }
+                }
+            };
+            write_frame(&mut wr, &reply).await
+        }
         ShimRequest::ClearStatus => {
             session.clear_status();
             write_frame(&mut wr, &ShimMsg::Ok).await

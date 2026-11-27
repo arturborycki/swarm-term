@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use swarm_client::{resolve, Attachment, Client, StreamEvent};
-use swarm_proto::{
+use swarm_proto::{SearchOpts, 
     now_ms, AttachMode, CreateOpts, MetaUpdate, ProgramStatus, SessionInfo, SessionState, Size, StatusRecord, StatusState,
 };
 use tokio::sync::mpsc;
@@ -144,6 +144,24 @@ enum Cmd {
         /// Session id, id prefix or name.
         #[arg(short, long)]
         session: Option<String>,
+    },
+    /// Find text in sessions' output: every session's scrollback, spilled
+    /// output included, newest lines first. Plain text, case-insensitive
+    /// unless it has a capital letter. Exits 1 when nothing matches.
+    Grep {
+        text: String,
+        /// Only this session: id, id prefix or name.
+        #[arg(short, long)]
+        session: Option<String>,
+        /// Ignore case even when the text has capitals.
+        #[arg(short, long, conflicts_with = "case_sensitive")]
+        ignore_case: bool,
+        /// Match case even when the text has no capitals.
+        #[arg(short = 'S', long)]
+        case_sensitive: bool,
+        /// Most lines shown per session, the most recent ones.
+        #[arg(short, long, default_value_t = 20)]
+        max: u32,
     },
     /// Print changes as they happen: sessions created, exited, renamed or
     /// removed, clients attaching, program status, bells and notifications.
@@ -296,14 +314,19 @@ async fn agents_cmd(host: &Option<String>, cmd: AgentsCmd, json: bool) -> Result
             "bin=\"$HOME/.local/share/swarm/bin/swarmctl\"; [ -x \"$bin\" ] || bin=swarmctl; exec \"$bin\" agents {sub}{}",
             if json { " --json" } else { "" }
         );
-        let status = tokio::process::Command::new("ssh").arg(host).arg(remote).status().await.context("run ssh")?;
+        swarm_client::check_ssh_host(host)?;
+        let status = tokio::process::Command::new("ssh")
+            .args(["--", host, &remote])
+            .status()
+            .await
+            .context("run ssh")?;
         return Ok(status.code().unwrap_or(1));
     }
     let paths = agents::Paths::from_home()?;
     let outcome = match cmd {
         AgentsCmd::Install => {
             let exe = std::env::current_exe().context("find this swarmctl")?;
-            agents::install(&paths, &exe.canonicalize().unwrap_or(exe))?
+            agents::install(&paths, &swarm_proto::paths::stable_exe(&exe.canonicalize().unwrap_or(exe)))?
         }
         AgentsCmd::Uninstall => agents::uninstall(&paths)?,
         AgentsCmd::Status => agents::status(&paths)?,
@@ -584,6 +607,53 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Cmd::Grep { text, session, ignore_case, case_sensitive, max } => {
+            let case_sensitive = match (ignore_case, case_sensitive) {
+                (true, _) => Some(false),
+                (_, true) => Some(true),
+                _ => None,
+            };
+            let opts = SearchOpts { text, case_sensitive, max_hits: max.clamp(1, swarm_proto::MAX_SEARCH_HITS) };
+            let results = client.search(opts).await.map_err(|e| older_daemon(&client, e))?;
+            let (mut found, mut skipped) = (results.found, results.skipped);
+            let sessions = client.list().await?;
+            if let Some(q) = session {
+                let s = resolve(&sessions, &q).map_err(|e| Exit(EXIT_NOT_FOUND, format!("{e:#}")))?;
+                found.retain(|f| f.id == s.id);
+                skipped.retain(|(id, _)| *id == s.id);
+            }
+            // Sessions with the most recent output first.
+            let last_output = |id: &str| sessions.iter().find(|s| s.id == id).map_or(0, |s| s.last_output_ms);
+            found.sort_by_key(|f| std::cmp::Reverse(last_output(&f.id)));
+            // Output from sessions is cleaned where it's read, but a host may
+            // run an older build: nothing that could start an escape sequence.
+            let name = |id: &str| {
+                sessions.iter().find(|s| s.id == id).map(|s| swarm_proto::clean_text(s.display_name())).unwrap_or_default()
+            };
+            for (id, why) in &skipped {
+                eprintln!("swarmctl: {} ({}) wasn't searched: {}", name(id), id.chars().take(10).collect::<String>(), swarm_proto::clean_text(why));
+            }
+            if json {
+                let all: Vec<_> = found
+                    .iter()
+                    .map(|f| serde_json::json!({ "id": f.id, "name": name(&f.id), "total": f.total, "hits": f.hits }))
+                    .collect();
+                print_json(&all)?;
+            } else {
+                let mut out = std::io::stdout().lock();
+                for f in &found {
+                    let more = f.total.saturating_sub(f.hits.len() as u64);
+                    let id_short: String = f.id.chars().take(10).collect();
+                    let extra = if more > 0 { format!(", {more} older not shown") } else { String::new() };
+                    writeln!(out, "{} ({id_short}): {} matching line{}{extra}", name(&f.id), f.total, if f.total == 1 { "" } else { "s" })?;
+                    for hit in &f.hits {
+                        writeln!(out, "  {}", swarm_proto::clean_text(&hit.line))?;
+                    }
+                }
+            }
+            // As grep: 1 for no match, 2 when some sessions couldn't be searched.
+            Ok(if !found.is_empty() { 0 } else if skipped.is_empty() { 1 } else { 2 })
+        }
         Cmd::Events => events(&client, json).await.map_err(|e| older_daemon(&client, e)),
         Cmd::Dump { session, raw } => {
             let s = find(&client, &session).await?;
@@ -657,8 +727,9 @@ async fn run(cli: Cli) -> Result<i32> {
 async fn service(host: &Option<String>, args: &str) -> Result<i32> {
     let mut cmd = match host {
         Some(h) => {
+            swarm_client::check_ssh_host(h)?;
             let mut c = tokio::process::Command::new("ssh");
-            c.args(["-o", "BatchMode=yes", h, &swarm_client::remote_swarmd_command(args)]);
+            c.args(["-o", "BatchMode=yes", "--", h, &swarm_client::remote_swarmd_command(args)]);
             c
         }
         None => {
@@ -677,6 +748,8 @@ async fn service(host: &Option<String>, args: &str) -> Result<i32> {
 #[derive(Default)]
 struct TextFilter {
     state: FilterState,
+    /// The start of a UTF-8 character cut off at the end of the last chunk.
+    carry: Vec<u8>,
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]
@@ -696,7 +769,8 @@ enum FilterState {
 impl TextFilter {
     fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
         use FilterState::*;
-        let mut out = Vec::with_capacity(bytes.len());
+        let mut out = std::mem::take(&mut self.carry);
+        out.reserve(bytes.len());
         for &b in bytes {
             self.state = match (self.state, b) {
                 (Text, 0x1b) => Escape,
@@ -719,8 +793,41 @@ impl TextFilter {
                 (StrEscape, _) => Str,
             };
         }
-        out
+        self.text_only(out)
     }
+
+    /// Keeps whole UTF-8 characters that aren't control or invisible ones:
+    /// a byte that isn't part of one (an 8-bit C1 control such as 0x9b,
+    /// which some terminals read as CSI) and characters like U+009B or the
+    /// bidi overrides are dropped.
+    fn text_only(&mut self, bytes: Vec<u8>) -> Vec<u8> {
+        let mut out = String::with_capacity(bytes.len());
+        let mut rest = &bytes[..];
+        loop {
+            match std::str::from_utf8(rest) {
+                Ok(text) => {
+                    push_safe(&mut out, text);
+                    break;
+                }
+                Err(e) => {
+                    let (good, bad) = rest.split_at(e.valid_up_to());
+                    push_safe(&mut out, std::str::from_utf8(good).unwrap_or_default());
+                    match e.error_len() {
+                        Some(n) => rest = &bad[n..],
+                        None => {
+                            self.carry = bad.to_vec();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        out.into_bytes()
+    }
+}
+
+fn push_safe(out: &mut String, text: &str) {
+    out.extend(text.chars().filter(|&c| c == '\n' || c == '\t' || !swarm_proto::is_unsafe_char(c)));
 }
 
 async fn find(client: &Client, query: &str) -> Result<SessionInfo> {
@@ -1323,6 +1430,7 @@ async fn attach(client: &Client, id: &str, readonly: bool, live: bool) -> Result
     });
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
     let mut guard_until = Instant::now() + REPLAY_INPUT_GUARD;
+    let mut replies = swarm_client::ReplyFilter::default();
     let mut last_offset = att.replay_from;
 
     let outcome = loop {
@@ -1354,7 +1462,9 @@ async fn attach(client: &Client, id: &str, readonly: bool, live: bool) -> Result
             input = in_rx.recv() => {
                 let Some(mut data) = input else { break "stdin closed".into() };
                 if Instant::now() < guard_until {
-                    data = swarm_client::strip_terminal_responses(&data);
+                    data = replies.push(&data);
+                } else if replies.is_holding() {
+                    data = [replies.flush(), data].concat();
                 }
                 let detach_at = data.iter().position(|&b| b == DETACH_KEY);
                 if let Some(i) = detach_at {
@@ -1366,6 +1476,13 @@ async fn attach(client: &Client, id: &str, readonly: bool, live: bool) -> Result
                 if detach_at.is_some() {
                     att.detach().await?;
                     break format!("detached from {name}");
+                }
+            }
+            // The guard ended with a reply's start held: it was typing.
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(guard_until)), if replies.is_holding() => {
+                let held = replies.flush();
+                if !readonly {
+                    att.input(held).await?;
                 }
             }
             _ = winch.recv() => {
@@ -1419,6 +1536,15 @@ mod tests {
         out.extend(f.feed(b"6f6f6b\x1b"));
         out.extend(f.feed(b"\\done \x1b]0;title\x07!\n"));
         assert_eq!(String::from_utf8(out).unwrap(), "green\nhook:done !\n");
+    }
+
+    #[test]
+    fn text_filter_drops_c1_and_invisible_characters() {
+        let mut f = TextFilter::default();
+        // A raw 0x9b (8-bit CSI), U+009B, a bidi override, and "é" cut in two.
+        let mut out = f.feed(b"a\x9b31mb\xc2\x9bc\xe2\x80\xaed\xc3");
+        out.extend(f.feed(b"\xa9\n"));
+        assert_eq!(String::from_utf8(out).unwrap(), "a31mbcd\u{e9}\n");
     }
 }
 

@@ -25,6 +25,9 @@ case "${1:-}" in
     "") ;;
     *) echo "usage: $0 [--release | --universal]" >&2; exit 2 ;;
 esac
+# What this build is made from, for scripts/publish-release.sh to check against the tag.
+mkdir -p "$ROOT/dist"
+"$ROOT/scripts/source-trees.sh" mac >"$ROOT/dist/SOURCE-mac.txt"
 # shellcheck disable=SC2086 # empty when debug
 cargo build -q $RELEASE_FLAG -p swarmd -p swarm-shim -p swarmctl
 

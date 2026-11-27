@@ -38,6 +38,13 @@ const OSC_BUF: usize = 4096;
 pub const MAX_TEXT: usize = 2048;
 
 /// `text` cut to at most `MAX_TEXT` bytes, at a character boundary.
+/// Text a program sent (a title, a notification) as it may be shown: no
+/// control or invisible characters, which could start escape sequences in a
+/// terminal that prints it (`swarmctl ls`), and at most [`MAX_TEXT`] bytes.
+fn shown_text(bytes: &[u8]) -> String {
+    capped(swarm_proto::clean_text(&String::from_utf8_lossy(bytes)))
+}
+
 fn capped(mut text: String) -> String {
     if text.len() > MAX_TEXT {
         let mut end = MAX_TEXT;
@@ -113,11 +120,12 @@ impl Perform for Collector {
             // vte splits on ';', which titles and URLs may contain: rejoin.
             b"0" | b"2" if params.len() > 1 => {
                 let joined = params[1..].join(&b';');
-                self.events.title = Some(capped(String::from_utf8_lossy(&joined).into_owned()));
+                self.events.title = Some(shown_text(&joined));
             }
             b"7" if params.len() > 1 => {
                 let url = String::from_utf8_lossy(&params[1..].join(&b';')).into_owned();
-                if let Some(cwd) = cwd_from_file_url(&url).filter(|c| c.len() <= MAX_TEXT) {
+                let shown = |c: &String| c.len() <= MAX_TEXT && !c.chars().any(swarm_proto::is_unsafe_char);
+                if let Some(cwd) = cwd_from_file_url(&url).filter(shown) {
                     self.events.cwd = Some(cwd);
                 }
             }
@@ -149,13 +157,13 @@ impl Perform for Collector {
             }
             // iTerm2 notification: OSC 9 ; text.
             b"9" if params.len() > 1 => {
-                let body = String::from_utf8_lossy(&params[1..].join(&b';')).into_owned();
+                let body = shown_text(&params[1..].join(&b';'));
                 self.events.status.push(StatusSignal::Notify { title: String::new(), body });
             }
             // rxvt notification: OSC 777 ; notify ; title ; body.
             b"777" if params.get(1) == Some(&&b"notify"[..]) => {
-                let title = params.get(2).map(|t| String::from_utf8_lossy(t).into_owned()).unwrap_or_default();
-                let body = String::from_utf8_lossy(&params.get(3..).unwrap_or(&[]).join(&b';')).into_owned();
+                let title = params.get(2).map(|t| shown_text(t)).unwrap_or_default();
+                let body = shown_text(&params.get(3..).unwrap_or(&[]).join(&b';'));
                 self.events.status.push(StatusSignal::Notify { title, body });
             }
             // kitty notification: OSC 99 ; metadata ; payload. Only whole,
@@ -164,7 +172,7 @@ impl Perform for Collector {
                 let meta = String::from_utf8_lossy(params[1]);
                 let keys: Vec<&str> = meta.split(':').collect();
                 if !keys.contains(&"e=1") && !keys.contains(&"d=0") {
-                    let text = String::from_utf8_lossy(&params[2..].join(&b';')).into_owned();
+                    let text = shown_text(&params[2..].join(&b';'));
                     let (title, body) = if keys.contains(&"p=body") { (String::new(), text) } else { (text, String::new()) };
                     self.events.status.push(StatusSignal::Notify { title, body });
                 }
@@ -269,6 +277,16 @@ mod tests {
         let ev = s.feed(0, b"\x1b]2;vim; main.rs\x07\x1b]7;file://mac.local/Users/me/my%20dir\x1b\\");
         assert_eq!(ev.title.as_deref(), Some("vim; main.rs"));
         assert_eq!(ev.cwd.as_deref(), Some("/Users/me/my dir"));
+    }
+
+    #[test]
+    fn titles_and_folders_lose_control_characters() {
+        let mut s = Scanner::default();
+        // U+009D (8-bit OSC) and U+009C (ST) in a title, a right-to-left override.
+        let ev = s.feed(0, "\x1b]2;a\u{9d}52;c;eA==\u{9c}b\u{202e}c\x07".as_bytes());
+        assert_eq!(ev.title.as_deref(), Some("a52;c;eA==bc"));
+        let ev = s.feed(100, b"\x1b]7;file://h/tmp/a%1bb\x07");
+        assert_eq!(ev.cwd, None);
     }
 
     #[test]

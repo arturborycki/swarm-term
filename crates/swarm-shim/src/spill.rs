@@ -150,13 +150,25 @@ impl Spill {
 
     /// The pieces of output before offset `until`, oldest first.
     pub fn pieces(&self, until: u64) -> Vec<Piece> {
+        self.pieces_between(0, until)
+    }
+
+    /// The pieces with output from `from` up to `until`; the others aren't
+    /// copied or read.
+    pub fn pieces_between(&self, from: u64, until: u64) -> Vec<Piece> {
         let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut out: Vec<Piece> = st.written.iter().map(|&(start, len)| Piece::File { start, len }).collect();
-        out.extend(st.queued.iter().map(|(start, bytes)| Piece::Memory { start: *start, bytes: bytes.clone() }));
-        if !st.open.is_empty() {
+        let wanted = |start: u64, len: u64| start < until && start + len > from;
+        let mut out: Vec<Piece> =
+            st.written.iter().filter(|&&(start, len)| wanted(start, len)).map(|&(start, len)| Piece::File { start, len }).collect();
+        out.extend(
+            st.queued
+                .iter()
+                .filter(|(start, bytes)| wanted(*start, bytes.len() as u64))
+                .map(|(start, bytes)| Piece::Memory { start: *start, bytes: bytes.clone() }),
+        );
+        if !st.open.is_empty() && wanted(st.open_start, st.open.len() as u64) {
             out.push(Piece::Memory { start: st.open_start, bytes: st.open.clone() });
         }
-        out.retain(|p| p.start() < until);
         out
     }
 
@@ -207,10 +219,11 @@ impl Spill {
             .map_err(|_| anyhow::anyhow!("encrypt"))?;
         let path = self.chunk_path(start);
         let tmp = path.with_extension("tmp");
+        // Created new, so a file or symlink put there isn't written through.
+        let _ = std::fs::remove_file(&tmp);
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&tmp)
             .with_context(|| format!("create {}", tmp.display()))?;

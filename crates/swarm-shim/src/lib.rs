@@ -2,6 +2,7 @@
 //! serves it on `$RUNTIME/shims/<id>.sock`. It outlives `swarmd` and the GUI.
 
 mod buffer;
+mod find;
 pub mod handoff;
 mod scan;
 mod screen;
@@ -183,18 +184,29 @@ pub fn run(cfg: ShimConfig) -> Result<()> {
 
 async fn async_run(cfg: ShimConfig) -> Result<()> {
     let shims = paths::shims_dir(&cfg.runtime_dir);
-    paths::ensure_private_dir(&cfg.runtime_dir)?;
-    paths::ensure_private_dir(&shims)?;
     let sock = paths::shim_socket(&cfg.runtime_dir, &cfg.id);
     let (session, listener) = match &cfg.adopt {
         // An in-place update: the socket is already bound, and listening.
+        // The session (its PTY) is taken over first, so that nothing that
+        // fails after can lose it.
         Some(adopt) => {
             let std_listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(adopt.listen_fd) };
-            std_listener.set_nonblocking(true)?;
-            let listener = UnixListener::from_std(std_listener)?;
-            (handoff::adopt(&cfg.id, cfg.scrollback, adopt)?, listener)
+            let session = handoff::adopt(&cfg.id, cfg.scrollback, adopt)?;
+            let listener = match std_listener.set_nonblocking(true).and_then(|_| UnixListener::from_std(std_listener)) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(id = %cfg.id, "couldn't use the handed-over socket ({e}); making a new one");
+                    let _ = std::fs::remove_file(&sock);
+                    let l = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
+                    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+                    l
+                }
+            };
+            (session, listener)
         }
         None => {
+            paths::ensure_private_dir(&cfg.runtime_dir)?;
+            paths::ensure_private_dir(&shims)?;
             if sock.exists() {
                 if tokio::net::UnixStream::connect(&sock).await.is_ok() {
                     bail!("a shim for {} is already running", cfg.id);
