@@ -194,6 +194,13 @@ pub enum Request {
     /// Look for text in every session's scrollback, spilled output included.
     /// Answered with [`Response::Found`].
     Search(SearchOpts),
+    /// Let local user `uid` watch session `id`, read-only, for `minutes`,
+    /// through a socket of its own. Answered with [`Response::Shared`].
+    Share { id: SessionId, uid: u32, minutes: u32 },
+    /// Stop sharing session `id` (`None`: every session). Viewers are cut off.
+    Unshare { id: Option<SessionId> },
+    /// The sessions being shared. Answered with [`Response::Shares`].
+    Shares,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -218,7 +225,22 @@ pub enum Response {
     /// Sessions with a match, each with its most recent matching lines, and
     /// those that weren't searched.
     Found(SearchResults),
+    Shared(ShareInfo),
+    Shares(Vec<ShareInfo>),
 }
+
+/// A session shared read-only with another local user.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ShareInfo {
+    pub session: SessionId,
+    pub uid: u32,
+    /// The socket the viewer connects to (`swarmctl watch <path>`).
+    pub path: String,
+    pub expires_ms: u64,
+}
+
+/// Longest a session can be shared for at once, in minutes (a day).
+pub const MAX_SHARE_MINUTES: u32 = 24 * 60;
 
 /// What [`Request::Search`] looks for.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -527,6 +549,28 @@ pub struct ProgramStatus {
     pub last_exit: Option<(i32, u64)>,
     /// When any of this last changed.
     pub changed_ms: u64,
+}
+
+/// UI metadata key: a command the daemon runs again in a session it
+/// recreates after a reboot (restore after reboot must be on).
+pub const META_RESTART: &str = "restart";
+/// Longest command kept for [`META_RESTART`].
+pub const MAX_RESTART_COMMAND: usize = 1024;
+
+/// Whether `cmd` can be run again after a reboot: one line, no control or
+/// invisible characters (it's typed into a shell, and a newline would run a
+/// second command), and not too long.
+pub fn check_restart_command(cmd: &str) -> Result<(), String> {
+    if cmd.trim().is_empty() {
+        return Err("the command is empty".into());
+    }
+    if cmd.len() > MAX_RESTART_COMMAND {
+        return Err(format!("the command is longer than {MAX_RESTART_COMMAND} bytes"));
+    }
+    if cmd.chars().any(is_unsafe_char) {
+        return Err("the command has control characters (one line only)".into());
+    }
+    Ok(())
 }
 
 impl ProgramStatus {

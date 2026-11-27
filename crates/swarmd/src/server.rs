@@ -22,6 +22,7 @@ const MAX_REQUESTS_IN_FLIGHT: usize = 64;
 pub struct Server {
     pub registry: Arc<Registry>,
     pub shutdown: Arc<Notify>,
+    pub shares: Arc<crate::share::Shares>,
 }
 
 impl Server {
@@ -287,6 +288,12 @@ impl Server {
                 r.clear_status(&id).await?;
                 Response::Ok
             }
+            Request::Share { id, uid, minutes } => Response::Shared(self.shares.share(r, &id, uid, minutes)?),
+            Request::Unshare { id } => {
+                self.shares.unshare(id.as_deref());
+                Response::Ok
+            }
+            Request::Shares => Response::Shares(self.shares.list()),
             Request::Attach { .. } | Request::Subscribe | Request::SubscribeStatus => {
                 unreachable!("handled by the connection loop")
             }
@@ -295,7 +302,7 @@ impl Server {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn relay(
+pub(crate) async fn relay(
     registry: Arc<Registry>,
     out: mpsc::Sender<ServerMsg>,
     request_id: u64,
@@ -451,7 +458,7 @@ async fn forward_output(
     }
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     let mut buf = [0u8; 256];
     let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
     if rc != 0 {

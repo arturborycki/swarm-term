@@ -13,6 +13,8 @@ use swarm_proto::{SearchOpts,
 use tokio::sync::mpsc;
 
 mod agents;
+mod export;
+mod layout;
 
 /// Ctrl-\ detaches, as in dtach.
 const DETACH_KEY: u8 = 0x1c;
@@ -84,6 +86,46 @@ enum Cmd {
     },
     /// Show everything known about a session (default: the one this runs in).
     Info { session: Option<String> },
+    /// Start the sessions a layout describes (~/.config/swarm/layouts/<name>.toml,
+    /// or a path): its tabs and panes, each in its folder, running its
+    /// command. The Swarm app opens them as tabs with their panes split.
+    /// With --host, every tab is on that host. Without a layout, lists them.
+    Up { layout: Option<String> },
+    /// Watch a session without typing or resizing: a session here (id, id
+    /// prefix or name), or the socket path another user shared with you.
+    Watch {
+        session: String,
+        /// Start with what it prints from now on, not what's on its screen.
+        #[arg(long)]
+        live: bool,
+    },
+    /// Let another user on this machine watch a session, read-only, for a
+    /// while (`swarmctl watch <path>` on their side). Without a session,
+    /// lists what's shared.
+    Share {
+        session: Option<String>,
+        /// Their user name.
+        #[arg(short, long)]
+        user: Option<String>,
+        /// How long, in minutes (at most a day).
+        #[arg(short, long, default_value_t = 60)]
+        minutes: u32,
+        /// Stop sharing the session (or everything, without one).
+        #[arg(long)]
+        stop: bool,
+    },
+    /// Run a command again in a session when it's recreated after a reboot
+    /// (needs `swarmctl daemon restore on`). Without --run or --clear, shows it.
+    OnReboot {
+        #[command(flatten)]
+        target: Target,
+        /// The command, one line, such as "npm run dev".
+        #[arg(long, conflicts_with = "clear")]
+        run: Option<String>,
+        /// Don't run anything again.
+        #[arg(long)]
+        clear: bool,
+    },
     /// Type text into a session (standard input if no text is given). Enter
     /// is pressed only with --enter or a newline in the text.
     Send {
@@ -171,8 +213,23 @@ enum Cmd {
     Dump {
         session: String,
         /// The bytes as written, escape sequences included.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "html")]
         raw: bool,
+        /// A web page with the output's colors.
+        #[arg(long)]
+        html: bool,
+    },
+    /// Record a session as an asciinema recording (asciicast v2): what's on
+    /// its screen now, then everything it prints, until Ctrl-C or it exits.
+    /// Play it with `asciinema play`.
+    Record {
+        session: String,
+        /// Write to this file instead of standard output.
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+        /// Start with what it prints from now on, not what's on its screen.
+        #[arg(long)]
+        live: bool,
     },
     /// Daemon control.
     Daemon {
@@ -232,6 +289,12 @@ enum DaemonCmd {
         /// Also redo sessions whose shim already runs the daemon's build.
         #[arg(long)]
         force: bool,
+    },
+    /// Recreate sessions whose processes are gone (after a reboot) when the
+    /// daemon starts: on, off, or status.
+    Restore {
+        #[arg(value_parser = ["on", "off", "status"], default_value = "status")]
+        state: String,
     },
 }
 
@@ -346,6 +409,9 @@ async fn agents_cmd(host: &Option<String>, cmd: AgentsCmd, json: bool) -> Result
 async fn run(cli: Cli) -> Result<i32> {
     let cmd = cli.cmd.unwrap_or(Cmd::Ls);
     let remote = cli.host.is_some();
+    if let Cmd::Daemon { cmd: DaemonCmd::Restore { state } } = &cmd {
+        return service(&cli.host, &format!("restore {state}")).await;
+    }
     if let Cmd::Daemon { cmd: c @ (DaemonCmd::InstallService | DaemonCmd::UninstallService | DaemonCmd::ServiceStatus) } =
         &cmd
     {
@@ -358,6 +424,17 @@ async fn run(cli: Cli) -> Result<i32> {
     }
     if let Cmd::Agents { cmd } = cmd {
         return agents_cmd(&cli.host, cmd, cli.json).await;
+    }
+    if let Cmd::Up { layout } = &cmd {
+        return up(layout.as_deref(), cli.host.as_deref()).await;
+    }
+    // A session another user shared: its own socket, not a daemon of ours.
+    if let Cmd::Watch { session, live } = &cmd {
+        if session.contains('/') {
+            let shared = Client::connect_shared(std::path::Path::new(session), "swarmctl").await?;
+            let Some(s) = shared.list().await?.into_iter().next() else { bail!("nothing is shared there") };
+            return attach(&shared, &s.id, true, *live).await;
+        }
     }
     let client = connect(&cli.host).await?;
     let json = cli.json;
@@ -434,6 +511,34 @@ async fn run(cli: Cli) -> Result<i32> {
             let info = client.set_meta(&id, MetaUpdate { name: None, ui: pairs.into_iter().collect() }).await?;
             for (k, v) in &info.ui {
                 println!("{k}={v}");
+            }
+            Ok(0)
+        }
+        Cmd::Watch { session, live } => {
+            let id = find(&client, &session).await?.id;
+            attach(&client, &id, true, live).await
+        }
+        Cmd::Share { session, user, minutes, stop } => share(&client, session, user, minutes, stop).await,
+        Cmd::OnReboot { target: t, run, clear } => {
+            let s = target(&client, t.session, remote).await?;
+            let value = match (run, clear) {
+                (Some(cmd), _) => {
+                    swarm_proto::check_restart_command(&cmd).map_err(|why| Exit(2, why))?;
+                    Some(cmd)
+                }
+                (None, true) => Some(String::new()),
+                (None, false) => None,
+            };
+            let info = match value {
+                Some(v) => {
+                    let ui = BTreeMap::from([(swarm_proto::META_RESTART.to_string(), v)]);
+                    client.set_meta(&s.id, MetaUpdate { name: None, ui }).await?
+                }
+                None => s,
+            };
+            match info.ui.get(swarm_proto::META_RESTART) {
+                Some(cmd) => println!("after a reboot, {} runs: {cmd}", info.display_name()),
+                None => println!("after a reboot, {} comes back as a shell", info.display_name()),
             }
             Ok(0)
         }
@@ -655,18 +760,26 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(if !found.is_empty() { 0 } else if skipped.is_empty() { 1 } else { 2 })
         }
         Cmd::Events => events(&client, json).await.map_err(|e| older_daemon(&client, e)),
-        Cmd::Dump { session, raw } => {
+        Cmd::Record { session, output, live } => {
+            let s = find(&client, &session).await?;
+            record(&client, &s, output, live).await
+        }
+        Cmd::Dump { session, raw, html } => {
             let s = find(&client, &session).await?;
             let mut att = client.attach(&s.id, AttachMode::History, None, true).await?;
             let end = att.live_from;
             let mut text = TextFilter::default();
             let mut out = std::io::stdout().lock();
             let mut at = att.replay_from;
+            // A page needs all of it first; it's at most the kept output.
+            let mut page = Vec::new();
             while at < end {
                 match att.recv().await {
                     Some(StreamEvent::Output { offset, data, .. }) => {
                         let keep = &data[..data.len().min(end.saturating_sub(offset) as usize)];
-                        if raw {
+                        if html {
+                            page.extend_from_slice(keep);
+                        } else if raw {
                             out.write_all(keep)?;
                         } else {
                             out.write_all(&text.feed(keep))?;
@@ -677,13 +790,16 @@ async fn run(cli: Cli) -> Result<i32> {
                     Some(StreamEvent::Lagged { .. } | StreamEvent::Closed { .. }) | None => break,
                 }
             }
+            if html {
+                out.write_all(export::to_html(&page, &swarm_proto::clean_text(s.display_name())).as_bytes())?;
+            }
             out.flush()?;
             drop(out);
             let _ = att.detach().await;
             Ok(0)
         }
         // Handled before connecting.
-        Cmd::Agents { .. } | Cmd::AgentHook { .. } => Ok(0),
+        Cmd::Agents { .. } | Cmd::AgentHook { .. } | Cmd::Up { .. } => Ok(0),
         Cmd::Daemon { cmd } => match cmd {
             DaemonCmd::Status | DaemonCmd::Start => {
                 client.ping().await?;
@@ -717,7 +833,10 @@ async fn run(cli: Cli) -> Result<i32> {
                 }
                 Ok(if failed { 1 } else { 0 })
             }
-            DaemonCmd::InstallService | DaemonCmd::UninstallService | DaemonCmd::ServiceStatus => unreachable!(),
+            DaemonCmd::InstallService
+            | DaemonCmd::UninstallService
+            | DaemonCmd::ServiceStatus
+            | DaemonCmd::Restore { .. } => unreachable!(),
         },
     }
 }
@@ -740,6 +859,183 @@ async fn service(host: &Option<String>, args: &str) -> Result<i32> {
     };
     let status = cmd.status().await.context("run swarmd service")?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// `swarmctl up`.
+async fn up(name: Option<&str>, host: Option<&str>) -> Result<i32> {
+    let Some(name) = name else {
+        let names = layout::names();
+        if names.is_empty() {
+            println!("no layouts in {}", layout::dir()?.display());
+        }
+        for n in names {
+            println!("{n}");
+        }
+        return Ok(0);
+    };
+    let path = layout::path_of(name)?;
+    let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let plan = layout::plan(&layout::parse(&text)?, host)?;
+    let title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| name.to_string());
+    let title = swarm_proto::clean_text(&title);
+    let token = format!("{:x}{:x}", now_ms(), std::process::id());
+    let mut clients: HashMap<Option<String>, Client> = HashMap::new();
+    let mut started = Vec::new();
+    for p in &plan {
+        if !clients.contains_key(&p.host) {
+            clients.insert(p.host.clone(), connect(&p.host).await?);
+        }
+        let client = &clients[&p.host];
+        let opts = CreateOpts {
+            command: Vec::new(),
+            cwd: p.cwd.clone(),
+            env: Vec::new(),
+            size: Size { cols: 120, rows: 32 },
+            name: p.name.clone(),
+            ui: layout::metadata(p, &title, &token),
+        };
+        let info = client.create(opts).await.with_context(|| format!("start {}", p.name.as_deref().unwrap_or("a session")))?;
+        started.push((p.clone(), info.id));
+    }
+    // Commands are typed once each shell has drawn its prompt.
+    let mut runs = Vec::new();
+    for (p, id) in &started {
+        let Some(cmd) = p.run.clone() else { continue };
+        let client = clients[&p.host].clone();
+        let id = id.clone();
+        runs.push(tokio::spawn(async move {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if client.list().await.is_ok_and(|v| v.iter().any(|s| s.id == id && s.last_output_ms > 0)) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            client.write(&id, format!("{cmd}\r").into_bytes()).await
+        }));
+    }
+    for r in runs {
+        r.await??;
+    }
+    let tabs = plan.iter().map(|p| p.tab).max().map_or(0, |t| t + 1);
+    println!("started {title}: {} session{} in {tabs} tab{}", started.len(), plural(started.len()), plural(tabs));
+    Ok(0)
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// `swarmctl share`.
+async fn share(client: &Client, session: Option<String>, user: Option<String>, minutes: u32, stop: bool) -> Result<i32> {
+    let id = match &session {
+        Some(q) => Some(find(client, q).await?.id),
+        None => None,
+    };
+    if stop {
+        client.unshare(id.as_deref()).await?;
+        println!("{}", if id.is_some() { "stopped sharing it" } else { "stopped sharing everything" });
+        return Ok(0);
+    }
+    let sessions = client.list().await?;
+    let name_of = |sid: &str| {
+        sessions.iter().find(|s| s.id == sid).map(|s| swarm_proto::clean_text(s.display_name())).unwrap_or_default()
+    };
+    let Some(id) = id else {
+        let shares = client.shares().await?;
+        if shares.is_empty() {
+            println!("nothing is shared");
+        }
+        for sh in shares {
+            println!("{}  with {} until {}  {}", name_of(&sh.session), user_name(sh.uid), clock(sh.expires_ms), sh.path);
+        }
+        return Ok(0);
+    };
+    let user = user.context("say who with --user")?;
+    let uid = user_id(&user).map_err(|why| Exit(2, why))?;
+    let info = client.share(&id, uid, minutes).await?;
+    println!("{} can watch {} until {} with:", user, name_of(&id), clock(info.expires_ms));
+    println!("  swarmctl watch {}", info.path);
+    println!("They can't type into it. Stop with: swarmctl share --stop {}", name_of(&id));
+    Ok(0)
+}
+
+fn user_id(name: &str) -> Result<u32, String> {
+    let cname = std::ffi::CString::new(name).map_err(|_| format!("{name:?} isn't a user name"))?;
+    let pw = unsafe { libc::getpwnam(cname.as_ptr()) };
+    if pw.is_null() {
+        return Err(format!("no user {name:?} on this machine"));
+    }
+    Ok(unsafe { (*pw).pw_uid })
+}
+
+fn user_name(uid: u32) -> String {
+    let pw = unsafe { libc::getpwuid(uid) };
+    if pw.is_null() {
+        return uid.to_string();
+    }
+    unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) }.to_string_lossy().into_owned()
+}
+
+/// "15:42" for a time in ms since the epoch, in local time.
+fn clock(ms: u64) -> String {
+    let t = (ms / 1000) as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return String::new();
+    }
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+}
+
+/// `swarmctl record`: an asciicast v2 recording of session `s`.
+async fn record(client: &Client, s: &SessionInfo, output: Option<std::path::PathBuf>, live: bool) -> Result<i32> {
+    let mode = if live { AttachMode::Live } else { AttachMode::Full };
+    let mut att = client.attach(&s.id, mode, None, true).await?;
+    let mut out: Box<dyn Write> = match &output {
+        Some(path) => Box::new(std::io::BufWriter::new(
+            std::fs::File::create(path).with_context(|| format!("create {}", path.display()))?,
+        )),
+        None => Box::new(std::io::stdout().lock()),
+    };
+    let size = att.info.size;
+    let title = swarm_proto::clean_text(att.info.display_name());
+    writeln!(out, "{}", export::cast_header(size.cols, size.rows, &title, swarm_proto::now_ms() / 1000))?;
+    let started = Instant::now();
+    let mut text = export::Utf8Chunks::default();
+    // After catching up (Lagged), replayed output is new to the recording.
+    let mut resumed = false;
+    if output.is_some() {
+        eprintln!("swarmctl: recording {title}; Ctrl-C to stop");
+    }
+    loop {
+        tokio::select! {
+            ev = att.recv() => match ev {
+                Some(StreamEvent::Output { data, replay, .. }) => {
+                    // What was on screen before the recording started is at 0.
+                    let at = if replay && !resumed { 0.0 } else { started.elapsed().as_secs_f64() };
+                    let chunk = text.push(&data);
+                    if !chunk.is_empty() {
+                        writeln!(out, "{}", export::cast_event(at, &chunk))?;
+                    }
+                }
+                Some(StreamEvent::Lagged { resume_at }) => {
+                    att = client.attach(&s.id, AttachMode::ResumeFrom(resume_at), None, true).await?;
+                    resumed = true;
+                }
+                Some(StreamEvent::Exited { .. } | StreamEvent::Closed { .. }) | None => break,
+            },
+            _ = tokio::signal::ctrl_c() => break,
+        }
+        out.flush()?;
+    }
+    out.flush()?;
+    drop(out);
+    let _ = att.detach().await;
+    if let Some(path) = output {
+        eprintln!("swarmctl: saved {}", path.display());
+    }
+    Ok(0)
 }
 
 /// Terminal output as plain text: escape sequences (colors, cursor moves,

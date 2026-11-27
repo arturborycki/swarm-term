@@ -156,6 +156,36 @@ pub fn recreate_opts(s: &SessionInfo) -> CreateOpts {
     }
 }
 
+/// The command to run again in recreated session `s`, if it has a valid one.
+pub fn restart_command(s: &SessionInfo) -> Option<String> {
+    let cmd = s.ui.get(swarm_proto::META_RESTART)?;
+    match swarm_proto::check_restart_command(cmd) {
+        Ok(()) => Some(cmd.clone()),
+        Err(why) => {
+            tracing::warn!(id = %s.id, "not running the restart command again: {why}");
+            None
+        }
+    }
+}
+
+/// Types `cmd` and Enter into session `id` once its shell has printed
+/// something (its prompt), or after a few seconds.
+async fn run_again(registry: Arc<Registry>, id: String, cmd: String) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if registry.list().iter().any(|s| s.id == id && s.last_output_ms > 0) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // The prompt is drawn in pieces; give the line editor a moment.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    match registry.write(&id, format!("{cmd}\r").into_bytes()).await {
+        Ok(()) => tracing::info!(%id, "ran the session's command again"),
+        Err(e) => tracing::warn!(%id, "couldn't run the session's command again: {e:#}"),
+    }
+}
+
 /// Recreates lost sessions (when enabled), then keeps the snapshot current.
 /// `running`: sessions still running though not adopted yet; they are not lost.
 pub async fn start(registry: &Arc<Registry>, running: &[String]) {
@@ -168,7 +198,12 @@ pub async fn start(registry: &Arc<Registry>, running: &[String]) {
     if is_enabled() {
         for s in lost(snapshot, &registry.list(), running) {
             match registry.create(recreate_opts(&s)).await {
-                Ok(new) => tracing::info!(old = %s.id, new = %new.id, "restored session after restart"),
+                Ok(new) => {
+                    tracing::info!(old = %s.id, new = %new.id, "restored session after restart");
+                    if let Some(cmd) = restart_command(&new) {
+                        tokio::spawn(run_again(registry.clone(), new.id.clone(), cmd));
+                    }
+                }
                 Err(e) => tracing::warn!(old = %s.id, "couldn't restore session: {e:#}"),
             }
         }
@@ -236,6 +271,18 @@ mod tests {
         assert_eq!(opts.ui.get("group").map(String::as_str), Some("builds"));
         assert!(!opts.ui.contains_key("warp.session_id"), "the old shell's Warp id doesn't carry over");
         assert_eq!(opts.ui.get("restored_from").map(String::as_str), Some("A"));
+    }
+
+    #[test]
+    fn a_restart_command_carries_over_if_it_is_one_safe_line() {
+        let mut s = session("A", &["zsh"]);
+        assert_eq!(restart_command(&s), None);
+        s.ui.insert("restart".into(), "npm run dev".into());
+        let opts = recreate_opts(&s);
+        assert_eq!(opts.ui.get("restart").map(String::as_str), Some("npm run dev"));
+        assert_eq!(restart_command(&s).as_deref(), Some("npm run dev"));
+        s.ui.insert("restart".into(), "make\nrm -rf ~".into());
+        assert_eq!(restart_command(&s), None, "a second line would run another command");
     }
 
     #[test]

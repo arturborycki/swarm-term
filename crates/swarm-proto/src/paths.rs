@@ -81,6 +81,45 @@ pub fn shim_socket(runtime: &Path, id: &str) -> PathBuf {
     shims_dir(runtime).join(format!("{id}.sock"))
 }
 
+/// Where this daemon's shared sessions' sockets go:
+/// `/tmp/swarm-share-<uid>/<id>`, with `<id>` from the runtime folder, so
+/// daemons with their own `SWARM_RUNTIME_DIR` don't touch each other's.
+/// Other users can pass through these folders (to reach a socket whose name
+/// they were given) but not list them. The daemon checks each viewer's uid;
+/// the folders only have to be this user's, not private.
+pub fn share_dir() -> PathBuf {
+    // FNV-1a: stable across runs, unlike std's hasher.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in runtime_dir().as_os_str().as_encoded_bytes() {
+        hash = (hash ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    PathBuf::from(format!("/tmp/swarm-share-{}", uid())).join(format!("{:08x}", hash as u32))
+}
+
+/// Makes [`share_dir`] and its parent (mode 0711), or checks that the ones
+/// there are real folders owned by this user that nobody else can write to.
+/// Someone else could make them first in `/tmp`; then sharing fails rather
+/// than use them.
+pub fn ensure_share_dir() -> io::Result<PathBuf> {
+    let dir = share_dir();
+    for d in [dir.parent().unwrap_or(&dir), &dir] {
+        match std::fs::DirBuilder::new().mode(0o711).create(d) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        let meta = std::fs::symlink_metadata(d)?;
+        if !meta.file_type().is_dir() || meta.uid() != uid() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} isn't a folder of this user's", d.display()),
+            ));
+        }
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o711))?;
+    }
+    Ok(dir)
+}
+
 /// `exe` as a path that lasts: for a Homebrew install, its `opt` link
 /// (`<prefix>/opt/swarmd/bin/swarmctl`) rather than the versioned
 /// `<prefix>/Cellar/swarmd/0.1.13/bin/swarmctl`, which `brew upgrade` removes.

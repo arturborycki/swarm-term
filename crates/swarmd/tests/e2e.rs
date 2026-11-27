@@ -1594,3 +1594,43 @@ async fn ports_lists_what_programs_in_a_session_listen_on() {
     assert!(p.program.starts_with("python") || p.program.starts_with("Python"), "program {:?}", p.program);
     c.kill(&info.id, libc::SIGKILL).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_shared_session_can_only_be_watched() {
+    let env = Env::new().await;
+    let c = env.client().await;
+    let info = c.create(sh_opts("shared")).await.unwrap();
+    c.set_meta(&info.id, swarm_proto::MetaUpdate { name: None, ui: [("secret".into(), "x".into())].into() }).await.unwrap();
+    let other = c.create(sh_opts("private")).await.unwrap();
+
+    // Shared with this user here, as the test can't be another user.
+    let share = c.share(&info.id, paths::uid(), 5).await.unwrap();
+    let viewer = Client::connect_shared(Path::new(&share.path), "viewer").await.unwrap();
+    let seen = viewer.list().await.unwrap();
+    assert_eq!(seen.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [info.id.as_str()]);
+    assert!(seen[0].ui.is_empty(), "a viewer doesn't see the session's metadata");
+    assert!(viewer.write(&info.id, b"echo typed\n".to_vec()).await.is_err());
+    assert!(viewer.create(sh_opts("new")).await.is_err());
+    assert!(viewer.attach(&other.id, AttachMode::Full, None, false).await.is_err());
+
+    // It sees output, and what it types goes nowhere.
+    let mut owner = c.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    let mut view = viewer.attach(&info.id, AttachMode::Live, None, false).await.unwrap();
+    view.input(b"echo from-viewer-$((1+1))\n".to_vec()).await.unwrap();
+    owner.input(b"echo from-owner-$((2+2))\n".to_vec()).await.unwrap();
+    read_until(&mut view, "from-owner-4").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let screen = c.screen(&info.id).await.unwrap();
+    let text: String = screen.rows.join("\n");
+    assert!(!text.contains("from-viewer"), "{text}");
+
+    // Shared with someone else: this user is turned away.
+    let theirs = c.share(&other.id, paths::uid() + 1, 5).await.unwrap();
+    assert!(Client::connect_shared(Path::new(&theirs.path), "viewer").await.is_err());
+
+    assert_eq!(c.shares().await.unwrap().len(), 2);
+    c.unshare(None).await.unwrap();
+    assert!(c.shares().await.unwrap().is_empty());
+    assert!(!Path::new(&share.path).exists());
+    assert!(Client::connect_shared(Path::new(&share.path), "viewer").await.is_err());
+}

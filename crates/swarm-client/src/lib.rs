@@ -107,6 +107,19 @@ impl Client {
         Client::handshake(rd, wr, client_name).await
     }
 
+    /// Connects to a session another user shared with this one (the socket
+    /// path they gave): a read-only view of that session only.
+    pub async fn connect_shared(path: &std::path::Path, client_name: &str) -> Result<Client> {
+        let s = tokio::net::UnixStream::connect(path)
+            .await
+            .with_context(|| format!("connect to {} (is it still shared?)", path.display()))?;
+        let (rd, wr) = s.into_split();
+        // The daemon hangs up on anyone it isn't shared with.
+        Client::handshake(rd, wr, client_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("{} isn't shared with you, or no longer is", path.display()))
+    }
+
     /// Connects to `host`'s daemon through `ssh host swarmd bridge`. Uses the
     /// system ssh, so keys, agent and `~/.ssh/config` apply.
     pub async fn connect_ssh(host: &str, client_name: &str) -> Result<Client> {
@@ -398,6 +411,26 @@ impl Client {
     pub async fn search(&self, opts: swarm_proto::SearchOpts) -> Result<swarm_proto::SearchResults> {
         match self.request(Request::Search(opts)).await? {
             Response::Found(found) => Ok(found),
+            other => bail!("unexpected {other:?}"),
+        }
+    }
+
+    /// Lets local user `uid` watch session `id` read-only for `minutes`.
+    pub async fn share(&self, id: &str, uid: u32, minutes: u32) -> Result<swarm_proto::ShareInfo> {
+        match self.request(Request::Share { id: id.into(), uid, minutes }).await? {
+            Response::Shared(info) => Ok(info),
+            other => bail!("unexpected {other:?}"),
+        }
+    }
+
+    /// Stops sharing session `id` (`None`: all of them).
+    pub async fn unshare(&self, id: Option<&str>) -> Result<()> {
+        self.request(Request::Unshare { id: id.map(str::to_string) }).await.map(|_| ())
+    }
+
+    pub async fn shares(&self) -> Result<Vec<swarm_proto::ShareInfo>> {
+        match self.request(Request::Shares).await? {
+            Response::Shares(v) => Ok(v),
             other => bail!("unexpected {other:?}"),
         }
     }
