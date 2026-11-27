@@ -203,7 +203,7 @@ fn run(if_not_running: bool) -> Result<()> {
         restore::start(&registry, &running).await;
         let upgrading = registry.clone();
         tokio::spawn(async move {
-            // Sessions started by an older build move to this build's shim,
+            // Sessions started by another build move to this build's shim,
             // one at a time, without restarting.
             upgrading.upgrade_shims(false).await;
             // The spill setting may have changed while the daemon was down.

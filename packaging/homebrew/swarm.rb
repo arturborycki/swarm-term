@@ -16,6 +16,8 @@ cask "swarm" do
   end
 
   auto_updates true
+  # The swarmd formula installs the same commands.
+  conflicts_with formula: "swarmd"
   depends_on macos: :ventura
 
   app "Swarm.app"

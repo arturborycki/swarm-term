@@ -1,7 +1,7 @@
 //! Program status: what the programs in a session say about themselves.
 //!
-//! The main source is the Program Status Protocol, OSC 7501
-//! (<https://www.superlogical.com/rex/docs/build/program-status>): a program
+//! The main source is the Program Status Protocol, OSC 7501 (described in
+//! the Swarm docs, under "Program status"): a program
 //! reports `idle`, `working`, `done`, `blocked` or `error`, with an optional
 //! reason, progress and app name, for itself (the root record) or for named
 //! pieces of work (`build/test`). Each report replaces its record whole.

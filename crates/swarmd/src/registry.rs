@@ -433,8 +433,10 @@ impl Registry {
                 "its shim predates in-place updates; it moves to the new build when the session is restarted".into(),
             );
         };
-        // Sessions move to this daemon's `swarm-shim` program, never to one
-        // older than they run (a half-finished install).
+        // Sessions on any other build move to this daemon's `swarm-shim`,
+        // which is installed with it, so they match the daemon. A shim
+        // program too old to say its build (a half-finished install) isn't
+        // used.
         let Some(target) = &self.shim_build else {
             return ShimUpgradeOutcome::Skipped(format!(
                 "{} is from an older build than this daemon; the session stays on its shim",

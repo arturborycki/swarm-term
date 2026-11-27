@@ -9,7 +9,8 @@ Until then they're published in the tap
 [arturborycki/homebrew-swarm](https://github.com/arturborycki/homebrew-swarm):
 `scripts/update-homebrew.sh` copies them there (without the comment at the top) and pushes
 on each release. Install from it with `brew install --cask arturborycki/swarm/swarm` or
-`brew install arturborycki/swarm/swarmd`.
+`brew install arturborycki/swarm/swarmd`. Install one or the other: both ship `swarmctl`, so
+each declares that it conflicts with the other.
 
 ## What Homebrew requires
 

@@ -21,6 +21,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 pub use swarm_proto;
+pub use swarm_proto::ForgedTimeFilter;
 
 /// What an attachment receives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +117,10 @@ impl Client {
                 "-T",
                 "-o",
                 "BatchMode=yes",
+                // A host that doesn't answer fails in seconds, not after the
+                // system's TCP timeout (a minute or more).
+                "-o",
+                "ConnectTimeout=10",
                 "-o",
                 "ServerAliveInterval=10",
                 "-o",
@@ -233,10 +238,15 @@ impl Client {
                         s.send_stream(stream, StreamEvent::Closed { reason }, true);
                     }
                     ServerMsg::Event(ev) => {
+                        let ev = match ev {
+                            SessionEvent::Created(i) => SessionEvent::Created(i.cleaned()),
+                            SessionEvent::Updated(i) => SessionEvent::Updated(i.cleaned()),
+                            other => other,
+                        };
                         let _ = s.events.send(ev);
                     }
                     ServerMsg::Status { id, status } => {
-                        let _ = s.status_events.send((id, status));
+                        let _ = s.status_events.send((id, status.cleaned()));
                     }
                     ServerMsg::Welcome { .. } => {}
                 }
@@ -294,14 +304,14 @@ impl Client {
 
     pub async fn list(&self) -> Result<Vec<SessionInfo>> {
         match self.request(Request::List).await? {
-            Response::Sessions(v) => Ok(v),
+            Response::Sessions(v) => Ok(v.into_iter().map(SessionInfo::cleaned).collect()),
             other => bail!("unexpected {other:?}"),
         }
     }
 
     pub async fn create(&self, opts: CreateOpts) -> Result<SessionInfo> {
         match self.request(Request::Create(opts)).await? {
-            Response::Session(s) => Ok(s),
+            Response::Session(s) => Ok(s.cleaned()),
             other => bail!("unexpected {other:?}"),
         }
     }
@@ -316,7 +326,7 @@ impl Client {
 
     pub async fn set_meta(&self, id: &str, update: MetaUpdate) -> Result<SessionInfo> {
         match self.request(Request::SetMeta { id: id.into(), update }).await? {
-            Response::Session(s) => Ok(s),
+            Response::Session(s) => Ok(s.cleaned()),
             other => bail!("unexpected {other:?}"),
         }
     }
@@ -371,7 +381,7 @@ impl Client {
     /// status for sessions that reported nothing).
     pub async fn status(&self) -> Result<Vec<(SessionId, ProgramStatus)>> {
         match self.request(Request::Status).await? {
-            Response::Statuses(s) => Ok(s),
+            Response::Statuses(s) => Ok(s.into_iter().map(|(id, st)| (id, st.cleaned())).collect()),
             other => bail!("unexpected {other:?}"),
         }
     }
@@ -831,6 +841,17 @@ mod host_tests {
 
 #[cfg(test)]
 mod filter_tests {
+    #[test]
+    fn a_program_cannot_send_swarm_time() {
+        let mut f = swarm_proto::ForgedTimeFilter::default();
+        let mut out = f.push(b"a\x1b]1337;SwarmTime=\x07b\x1b]1337;Swa");
+        out.extend(f.push(b"rmTime=5\x07c\x1b[0m"));
+        out.extend(f.finish());
+        assert_eq!(out, b"a\x1b]1337;SwarmTime-forged=\x07b\x1b]1337;SwarmTime-forged=5\x07c\x1b[0m");
+        assert_eq!(f.push(b"x\x1b]1"), b"x");
+        assert_eq!(f.finish(), b"\x1b]1");
+    }
+
     use super::strip_terminal_responses as strip;
     use super::EolMarkFilter;
 

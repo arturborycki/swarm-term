@@ -12,6 +12,9 @@ class Swarmd < Formula
 
   depends_on "rust" => :build
 
+  # The Swarm app's cask ships the same commands.
+  conflicts_with cask: "swarm"
+
   def install
     system "cargo", "install", *std_cargo_args(path: "crates/swarmd")
     system "cargo", "install", *std_cargo_args(path: "crates/swarmctl")
@@ -19,7 +22,8 @@ class Swarmd < Formula
 
   service do
     run [opt_bin/"swarmd", "run"]
-    keep_alive true
+    # Restarted if it crashes, not after `swarmd stop`.
+    keep_alive successful_exit: false
   end
 
   test do

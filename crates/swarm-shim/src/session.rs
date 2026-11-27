@@ -30,6 +30,10 @@ const NO_LAG: u64 = u64::MAX;
 /// Most input held for a program that isn't reading it.
 pub(crate) const MAX_PENDING_INPUT: usize = 16 * 1024 * 1024;
 
+/// `OSC 7501 ; ?` is answered at most this often. A program asks once, when
+/// it starts.
+const QUERY_REPLY_EVERY_MS: u64 = 1000;
+
 pub struct Session {
     pub(crate) inner: Mutex<Inner>,
     /// The PTY's master side. Kept as a plain descriptor so an in-place
@@ -43,6 +47,9 @@ pub struct Session {
     /// in-place update: the new program starts with none.
     status: Mutex<StatusBook>,
     status_tx: watch::Sender<ProgramStatus>,
+    /// When `OSC 7501 ; ?` was last answered (ms): a program sending it in a
+    /// loop would otherwise have the shim type replies into the shell.
+    query_answered_ms: std::sync::atomic::AtomicU64,
     pid: u32,
     reader_done: (Mutex<bool>, Condvar),
     pub(crate) reader_ctl: ReaderCtl,
@@ -158,6 +165,8 @@ pub(crate) struct Inner {
     /// The terminal screen as the output left it, for full-screen apps.
     pub(crate) screen: crate::screen::Screen,
     pub(crate) scanner: Scanner,
+    /// Program output's `OSC 1337 ; SwarmTime=`, made harmless.
+    forged: swarm_proto::ForgedTimeFilter,
     pub(crate) info: SessionInfo,
     clients: HashMap<u64, Slot>,
     pub(crate) next_client: u64,
@@ -178,6 +187,7 @@ impl Inner {
             headers: Default::default(),
             screen,
             scanner: Scanner::default(),
+            forged: Default::default(),
             info,
             clients: HashMap::new(),
             next_client: 1,
@@ -317,6 +327,7 @@ impl Session {
             info_tx,
             status: Mutex::new(StatusBook::default()),
             status_tx: watch::channel(ProgramStatus::default()).0,
+            query_answered_ms: std::sync::atomic::AtomicU64::new(0),
             pid,
             reader_done: (Mutex::new(false), Condvar::new()),
             reader_ctl: ReaderCtl::default(),
@@ -388,6 +399,13 @@ impl Session {
 
     fn on_output(&self, data: &[u8]) {
         let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Only the shim times replayed output: a program's own `SwarmTime`
+        // is renamed before it's kept or shown.
+        let filtered = inner.forged.push(data);
+        let data = &filtered[..];
+        if data.is_empty() {
+            return;
+        }
         let offset = inner.ring.end();
         match inner.spill.clone() {
             Some(spill) => {
@@ -630,7 +648,9 @@ impl Session {
             self.status_tx.send_replace(book.snapshot());
         }
         drop(book);
-        if query {
+        let last = self.query_answered_ms.load(Ordering::Relaxed);
+        if query && now.saturating_sub(last) >= QUERY_REPLY_EVERY_MS {
+            self.query_answered_ms.store(now, Ordering::Relaxed);
             // Answered once, by the shim: the terminals showing the session
             // may not know the protocol.
             let reply = crate::status::QUERY_REPLY.to_vec();

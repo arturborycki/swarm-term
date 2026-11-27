@@ -296,13 +296,38 @@ fn read_text(path: &Path) -> Result<String> {
 /// Writes `text` to `path` through a temporary file, after copying the old file to
 /// `<path>.swarm-backup`.
 fn write_with_backup(path: &Path, text: &str) -> Result<()> {
-    if path.exists() {
-        let backup = PathBuf::from(format!("{}.swarm-backup", path.display()));
-        std::fs::copy(path, &backup).with_context(|| format!("back up {} to {}", path.display(), backup.display()))?;
-    }
-    let tmp = PathBuf::from(format!("{}.swarm-tmp", path.display()));
-    std::fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    // A settings file that is a symlink (into a dotfiles repo, say) stays one:
+    // the file it points to is the one rewritten.
+    let real = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => path.to_path_buf(),
+    };
+    // The rewritten file keeps the mode it had; a new one is private.
+    let mode = match std::fs::metadata(&real) {
+        Ok(m) => {
+            let backup = PathBuf::from(format!("{}.swarm-backup", path.display()));
+            let _ = std::fs::remove_file(&backup);
+            std::fs::copy(&real, &backup)
+                .with_context(|| format!("back up {} to {}", path.display(), backup.display()))?;
+            m.permissions().mode() & 0o7777
+        }
+        Err(_) => 0o600,
+    };
+    let tmp = PathBuf::from(format!("{}.swarm-tmp", real.display()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    // The umask may have taken bits off; set the mode the file had.
+    f.set_permissions(std::fs::Permissions::from_mode(mode)).with_context(|| format!("write {}", tmp.display()))?;
+    f.write_all(text.as_bytes()).and_then(|_| f.sync_all()).with_context(|| format!("write {}", tmp.display()))?;
+    drop(f);
+    std::fs::rename(&tmp, &real).with_context(|| format!("replace {}", real.display()))?;
     Ok(())
 }
 

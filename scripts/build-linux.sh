@@ -31,6 +31,9 @@ build() {
     done
 }
 
+# What this build is made from, for scripts/publish-release.sh to check against the tag.
+mkdir -p "$ROOT/dist"
+"$ROOT/scripts/source-trees.sh" linux >"$ROOT/dist/SOURCE-linux.txt"
 if [ "$(uname -s)" = Linux ]; then
     build "$ROOT"
 else

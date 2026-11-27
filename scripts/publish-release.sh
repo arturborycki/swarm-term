@@ -15,6 +15,9 @@
 #
 # Afterwards, scripts/update-homebrew.sh updates packaging/homebrew/.
 #
+# The build scripts record the sources they built from in dist/SOURCE-*.txt; the release
+# is refused unless the tags hold the same.
+#
 # Usage: scripts/publish-release.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -55,6 +58,14 @@ check_tag() { # <repo dir> <branch> <file with the version> <name>
 }
 check_tag "$ROOT" main Cargo.toml swarm-term
 check_tag "$ROOT/app" swarm app/Cargo.toml swarm-app
+# The DMG and the archives must be built from what the tags hold: the build scripts
+# record their sources in dist/SOURCE-*.txt.
+for kind in mac linux; do
+    built="$ROOT/dist/SOURCE-$kind.txt"
+    [ -f "$built" ] || fail "missing $built: build again with scripts/bundle-app.sh and scripts/build-linux.sh"
+    diff <("$ROOT/scripts/source-trees.sh" "$kind" "$TAG") "$built" >/dev/null ||
+        fail "the $kind build isn't from what $TAG holds: build again from the tagged commits"
+done
 gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && fail "release $TAG already exists"
 
 echo "Creating the GitHub release $TAG"

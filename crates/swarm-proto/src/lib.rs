@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub use frame::{read_frame, write_frame, FrameReader, MAX_FRAME_LEN};
+pub use frame::{read_frame, read_frame_body, undecodable_request_id, write_frame, FrameReader, MAX_FRAME_LEN};
 
 /// Bumped on any incompatible change to the messages below.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -97,6 +97,18 @@ impl SessionInfo {
 
     pub fn is_running(&self) -> bool {
         matches!(self.state, SessionState::Running)
+    }
+
+    /// Drops control and invisible characters from the text a program in the
+    /// session sets (title, folder, foreground name) and from the name. A
+    /// current shim already cleans them; an older one, on a remote host,
+    /// may not.
+    pub fn cleaned(mut self) -> Self {
+        self.name = self.name.map(|n| clean_text(&n));
+        self.title = clean_text(&self.title);
+        self.cwd = self.cwd.map(|c| clean_text(&c));
+        self.foreground = self.foreground.map(|f| clean_text(&f));
+        self
     }
 }
 
@@ -563,8 +575,68 @@ pub fn is_unsafe_char(c: char) -> bool {
 }
 
 /// `text` without [`is_unsafe_char`] characters; a tab becomes a space.
+impl ProgramStatus {
+    /// `ProgramStatus` with the text programs report cleaned, as `SessionInfo::cleaned`.
+    pub fn cleaned(mut self) -> Self {
+        let opt = |t: Option<String>| t.map(|t| clean_text(&t));
+        for r in &mut self.records {
+            r.id = clean_text(&r.id);
+            r.app = opt(r.app.take());
+            r.title = opt(r.title.take());
+            r.msg = opt(r.msg.take());
+        }
+        if let Some(n) = &mut self.notification {
+            n.title = clean_text(&n.title);
+            n.body = clean_text(&n.body);
+        }
+        self
+    }
+}
+
 pub fn clean_text(text: &str) -> String {
     text.chars().filter(|&c| !is_unsafe_char(c)).map(|c| if c == '\t' { ' ' } else { c }).collect()
+}
+
+/// Live output with any `OSC 1337 ; SwarmTime=` a program sent made
+/// harmless. Swarm sends that sequence itself around replayed output (the
+/// times of replayed blocks, and the end of a replay); a program printing it
+/// could otherwise fake both. The key is renamed, which terminals ignore. A
+/// possible start at the end of a chunk is held for the next one, or
+/// [`Self::finish`].
+#[derive(Default)]
+pub struct ForgedTimeFilter {
+    carry: Vec<u8>,
+}
+
+const SWARM_TIME: &[u8] = b"\x1b]1337;SwarmTime=";
+
+impl ForgedTimeFilter {
+    pub fn push(&mut self, data: &[u8]) -> Vec<u8> {
+        let mut input = std::mem::take(&mut self.carry);
+        input.extend_from_slice(data);
+        let mut out = Vec::with_capacity(input.len());
+        let mut i = 0;
+        while i < input.len() {
+            let rest = &input[i..];
+            if rest.starts_with(SWARM_TIME) {
+                out.extend_from_slice(b"\x1b]1337;SwarmTime-forged=");
+                i += SWARM_TIME.len();
+            } else if rest[0] == 0x1b && SWARM_TIME.starts_with(rest) {
+                // Cut off at the end: maybe the start of one.
+                self.carry = rest.to_vec();
+                break;
+            } else {
+                out.push(rest[0]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// What was held back.
+    pub fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.carry)
+    }
 }
 
 pub fn now_ms() -> u64 {

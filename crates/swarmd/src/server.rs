@@ -106,7 +106,19 @@ impl Server {
         let mut subscribed = false;
         let mut status_subscribed = false;
 
-        while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+        while let Ok(Some(body)) = swarm_proto::read_frame_body(&mut rd).await {
+            let msg = match swarm_proto::frame::decode::<ClientMsg>(&body) {
+                Ok(msg) => msg,
+                // A newer client's request: answer it, keep the connection.
+                Err(_) => match swarm_proto::undecodable_request_id(&body) {
+                    Some(id) => {
+                        let why = format!("swarmd {} doesn't know this request; update it", swarm_proto::VERSION);
+                        let _ = out_tx.send(ServerMsg::Response { id, result: Err(why) }).await;
+                        continue;
+                    }
+                    None => break,
+                },
+            };
             // A connection can live for weeks (the app lists sessions every
             // few seconds): drop handles of tasks that are done.
             tasks.retain(|t: &tokio::task::JoinHandle<()>| !t.is_finished());

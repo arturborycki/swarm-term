@@ -133,7 +133,7 @@ const toc = [
           <code>1</code>–<code>9</code> a tab, <code>,</code> rename the pane, <code>[</code> Copy Mode, <code>w</code>{' '}
           Go to Anything. <code>r</code> starts resize mode: the arrows (or hjkl) resize the pane until Esc or Return.
           The prefix pressed twice passes it on: to the running program, such as a full-screen editor, or at the
-          prompt to the input (Ctrl-A to the start of the line).
+          prompt to the input (Ctrl-A to the start of the line). Any other key after the prefix is ignored, as in tmux.
         </li>
         <li>
           <strong>Insert Path…</strong> (⇧⌘I) types the paths of files or folders you choose into the session. In a
@@ -195,10 +195,12 @@ const toc = [
         advance (with a script or configuration management) or to use <code>swarmctl</code> on a Linux machine. Both
         builds are static and need no root; pick the one <code>uname -m</code> names.
       </p>
-      <pre class="term">mkdir -p ~/.local/share/swarm/bin
-curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
-<span class="d"># ARM servers (aarch64): use swarmd-{VERSION}-linux-aarch64.tar.gz</span>
-~/.local/share/swarm/bin/swarmd --version</pre>
+      <pre class="term">mkdir -p ~/.local/share/swarm/bin && cd ~/.local/share/swarm/bin
+curl -fsSLO {linuxTarball('x86_64')}
+echo "{LINUX_SHA256_X86_64}  swarmd-{VERSION}-linux-x86_64.tar.gz" | sha256sum -c -
+tar -xzf swarmd-{VERSION}-linux-x86_64.tar.gz && rm swarmd-{VERSION}-linux-x86_64.tar.gz
+<span class="d"># ARM servers (aarch64): use swarmd-{VERSION}-linux-aarch64.tar.gz and its checksum below</span>
+./swarmd --version</pre>
       <ul class="files">
         <li>
           <a href={linuxTarball('x86_64')}>swarmd-{VERSION}-linux-x86_64.tar.gz</a>
@@ -272,7 +274,7 @@ curl -fsSL {linuxTarball('x86_64')} | tar -xz -C ~/.local/share/swarm/bin
           <tr><td><code>swarmctl wait -s agent --until blocked,done</code></td><td>Wait until a program needs you or finishes.</td></tr>
           <tr><td><code>swarmctl agents install</code></td><td>Have Claude Code and Codex report when they're working, waiting for you or done (see <a href="#program-status">Program status</a>). <code>status</code> and <code>uninstall</code> too.</td></tr>
           <tr><td><code>swarmctl ports</code></td><td>TCP ports that programs in sessions listen on, such as a development server, with the program and whether it listens on localhost only. <code>-s</code> for one session. In the app, Go to Anything (⌘P) offers to open them, forwarding the port first when the session is on another host.</td></tr>
-          <tr><td><code>swarmctl grep 'disk full'</code></td><td>Find text in every session's output, output kept on disk included: the matching lines, newest first, under their session. Ignores case unless the text has a capital letter (<code>-i</code> and <code>-S</code> choose). <code>-s</code> for one session, <code>--max</code> for how many lines per session (up to 1,000). Exits 1 when nothing matches, 2 when some sessions couldn't be searched (they're named).</td></tr>
+          <tr><td><code>swarmctl grep 'disk full'</code></td><td>Find text in every session's output, output kept on disk included: the matching lines, newest first, under their session. Ignores case unless the text has a capital letter (<code>-i</code> and <code>-S</code> choose). <code>-s</code> for one session, <code>--max</code> for how many lines per session (up to 1,000). Exits 1 when nothing matches, and 2 when nothing matches and some sessions couldn't be searched (they're named).</td></tr>
           <tr><td><code>swarmctl events</code></td><td>Print changes as they happen: sessions created, exited or renamed, status, bells and notifications. One JSON object per line with <code>--json</code>.</td></tr>
         </tbody>
       </table>
