@@ -33,6 +33,16 @@ brew install --cask arturborycki/swarm/swarm
 - **Find in every session:** Find in All Sessions (⇧⌘F) searches the output
   of all your sessions, on this Mac and connected hosts, detached ones and
   output kept on disk included, and opens the one you pick at the match.
+- **Layouts:** save a window's tabs and panes, or write them in
+  `~/.config/swarm/layouts/<name>.toml`, and start them all, local and remote,
+  with File → Start Layout… or `swarmctl up <name>`. After a reboot, sessions
+  can come back and run their command again.
+- **An inbox for your agents:** the menu bar icon lists every session that
+  needs you, on every host; a notification opens its session, and when Claude
+  Code asks for permission, "Allow Once" answers it without switching apps.
+- **Watch, share, export:** watch any session read-only, let another user on
+  the machine watch one (`swarmctl share`), save a session's output as a web
+  page, or record it for asciinema.
 - **tmux keys if you want them:** turn on Ctrl-B (or Ctrl-A) prefix keys in
   Settings → Keyboard Shortcuts to split, move between, zoom and resize panes
   as in tmux.
@@ -99,7 +109,10 @@ Program Status Protocol, OSC 7501, plus bells, notifications and progress), `wai
 waits for a program to need you, and `swarmctl events` streams changes. `swarmctl agents install`
 has Claude Code and Codex report their state through hooks. `swarmctl ports` lists the
 ports programs in sessions listen on, such as a dev server, and `swarmctl grep <text>` finds text in
-every session's output. The daemon starts on first use;
+every session's output. `swarmctl up <layout>` starts a layout, `swarmctl watch` and `swarmctl share`
+watch sessions read-only (yours, or one shared with another local user), `swarmctl record` and
+`dump --html` export output, and `swarmctl on-reboot` runs a command again when a session is
+recreated after a reboot. The daemon starts on first use;
 `swarmd stop` stops it without ending any session.
 
 To start the daemon at login instead (launchd agent on macOS, systemd user unit

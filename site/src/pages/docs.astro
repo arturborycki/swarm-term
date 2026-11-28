@@ -80,6 +80,57 @@ const toc = [
         <strong>Move Pane to Tab…</strong> (choose the tab in Go to Anything), <strong>Move Pane to New Window</strong>{' '}
         and <strong>Move Tab to New Window</strong>.
       </p>
+      <h3 id="layouts">Layouts</h3>
+      <p>
+        A layout is a set of tabs to start together: each tab's panes, on this Mac or a host, in a folder, maybe running
+        a command. <strong>File → Save Tab as Layout…</strong> saves the tab on screen, with its panes, as one;{' '}
+        <strong>File → Start Layout…</strong> (or <code>swarmctl up &lt;name&gt;</code>) starts it, and Swarm opens its
+        sessions as tabs with their panes split. Layouts are files in <code>~/.config/swarm/layouts/</code>:
+      </p>
+      <pre class="term"><span class="d"># ~/.config/swarm/layouts/web.toml</span>
+[[tab]]
+name = "server"
+cwd = "~/src/web"
+run = "npm run dev"
+
+[[tab.pane]]              <span class="d"># more panes in the same tab</span>
+name = "tests"
+run = "npm test -- --watch"
+split = "down"            <span class="d"># or "right"</span>
+
+[[tab]]
+name = "logs"
+host = "devbox"           <span class="d"># a host from ~/.ssh/config</span>
+run = "tail -f /var/log/app.log"</pre>
+      <p>
+        A pane without a folder uses its tab's. Commands are one line each, and they run again after a reboot (below).
+      </p>
+      <h3 id="after-reboot">After a reboot</h3>
+      <p>
+        Sessions survive quitting the app and restarting the daemon, but not restarting the computer. With{' '}
+        <code>swarmctl daemon restore on</code>, the daemon recreates them afterwards: same name, folder and tab, as a
+        fresh shell. <strong>Session → Run Again After Reboot</strong> also runs the session's last command there, such
+        as your dev server (choose it again to stop); it turns restore on for that machine.{' '}
+        <code>swarmctl on-reboot -s server --run "npm run dev"</code> does the same from a shell.
+      </p>
+      <h3 id="export">Export and record</h3>
+      <p>
+        <strong>Session → Export Output…</strong> saves everything the session has kept, as a web page with its colors
+        (<code>.html</code>) or as plain text (any other name). <strong>Start or Stop Recording…</strong> records the
+        session from now until you choose it again, as an asciinema recording (<code>.cast</code>) to play with{' '}
+        <code>asciinema play</code>.
+      </p>
+      <h3 id="watching">Watching and sharing</h3>
+      <p>
+        Go to Anything (⌘P) offers <strong>Watch … (read-only)</strong> for every running session, including those open
+        in another window or on another Mac: you see it live and can't type into it or resize it.
+      </p>
+      <p>
+        To let someone else on the same machine watch a session, run{' '}
+        <code>swarmctl share build --user ana</code>. They run the <code>swarmctl watch &lt;path&gt;</code> it prints
+        and see that session read-only, for an hour (<code>--minutes</code>, at most a day). Only that user can connect,
+        they can't type, resize or see other sessions, and <code>swarmctl share --stop</code> cuts them off.
+      </p>
       <p>
         <strong>View → Import Theme…</strong> turns an iTerm2 color preset (<code>.itermcolors</code>) or a Ghostty theme
         file into a Swarm theme and switches to it.
@@ -145,8 +196,11 @@ const toc = [
       </ul>
       <p>
         A background session that needs you, finishes or fails sends a notification, and sessions waiting for you are
-        counted on the Dock icon. <strong>Mark as Unread</strong> (⌥⌘U) keeps a session flagged until you open it again;{' '}
-        <strong>Mute Session</strong> silences one session.
+        counted on the Dock icon. Clicking a notification opens that session. When Claude Code asks for permission,
+        the notification has <strong>Allow Once</strong>, which answers yes without switching to Swarm (only if it's
+        still asking). The Swarm icon in the menu bar lists under <strong>Needs You</strong> every session waiting for
+        you, failed or disconnected, on every host. <strong>Mark as Unread</strong> (⌥⌘U) keeps a session flagged until
+        you open it again; <strong>Mute Session</strong> silences one session.
       </p>
 
       <h2 id="remote">Remote hosts</h2>
@@ -250,7 +304,12 @@ tar -xzf swarmd-{VERSION}-linux-x86_64.tar.gz && rm swarmd-{VERSION}-linux-x86_6
           <tr><td><code>swarmctl new -n build</code></td><td>Create a session and attach to it (<code>-d</code> to leave it detached).</td></tr>
           <tr><td><code>swarmctl attach build</code></td><td>Attach by id, id prefix or name. Ctrl-\ detaches.</td></tr>
           <tr><td><code>swarmctl rename build ci</code></td><td>Rename a session; the app follows live.</td></tr>
-          <tr><td><code>swarmctl dump build</code></td><td>Print everything the session has kept.</td></tr>
+          <tr><td><code>swarmctl dump build</code></td><td>Print everything the session has kept (<code>--html</code>: as a web page with its colors).</td></tr>
+          <tr><td><code>swarmctl record build -o build.cast</code></td><td>Record the session as an asciinema recording until Ctrl-C or it exits.</td></tr>
+          <tr><td><code>swarmctl watch build</code></td><td>Watch a session read-only, or a session someone shared with you (its path).</td></tr>
+          <tr><td><code>swarmctl share build --user ana</code></td><td>Let another user on this machine watch a session read-only for a while. Without a session, lists what's shared; <code>--stop</code> ends it.</td></tr>
+          <tr><td><code>swarmctl up web</code></td><td>Start a layout's tabs and panes (<code>~/.config/swarm/layouts/web.toml</code>); without a name, list layouts.</td></tr>
+          <tr><td><code>swarmctl on-reboot -s server --run 'npm run dev'</code></td><td>Run a command again when the session is recreated after a reboot (<code>--clear</code> to stop). Needs <code>swarmctl daemon restore on</code>.</td></tr>
           <tr><td><code>swarmctl info build</code></td><td>Show everything known about a session.</td></tr>
           <tr><td><code>swarmctl kill build</code></td><td>Send a signal to the session's process (HUP by default).</td></tr>
           <tr><td><code>swarmctl rm build</code></td><td>End the session if needed and drop it.</td></tr>

@@ -253,7 +253,12 @@ impl Session {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
         // A folder that doesn't exist here (e.g. sent from another machine)
         // falls back to home instead of failing the session.
-        let cwd = opts.cwd.clone().filter(|d| std::path::Path::new(d).is_dir()).unwrap_or(home);
+        // `~` is this machine's home, for folders written on another one (a layout).
+        let expanded = opts.cwd.as_deref().map(|d| match d.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{home}{rest}"),
+            _ => d.to_string(),
+        });
+        let cwd = expanded.filter(|d| std::path::Path::new(d).is_dir()).unwrap_or(home);
         cmd.cwd(&cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");

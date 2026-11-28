@@ -4,6 +4,7 @@ mod memory;
 mod ports;
 mod registry;
 mod restore;
+mod share;
 mod server;
 mod service;
 mod spill;
@@ -223,7 +224,7 @@ fn run(if_not_running: bool) -> Result<()> {
         });
         tokio::spawn(memory::run(registry.clone()));
         let shutdown = Arc::new(Notify::new());
-        let server = Arc::new(server::Server { registry, shutdown: shutdown.clone() });
+        let server = Arc::new(server::Server { registry, shutdown: shutdown.clone(), shares: share::Shares::new() });
         tracing::info!(socket = %sock.display(), "swarmd {} listening", swarm_proto::VERSION);
         let keeper = tokio::spawn(keep_socket(server.clone(), runtime.clone(), bound, lock_ino));
 
