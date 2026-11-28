@@ -10,8 +10,8 @@ export const DMG = `https://swarm-term.com/download/Swarm-${VERSION}.dmg`;
 /** Linux builds of swarmd, swarm-shim and swarmctl, for installing on a server by hand (scripts/make-linux-tarballs.sh). */
 export const linuxTarball = (arch: 'x86_64' | 'aarch64') =>
   `https://swarm-term.com/download/swarmd-${VERSION}-linux-${arch}.tar.gz`;
-export const LINUX_SHA256_X86_64 = 'fec2fc30ca61d7738a40b1d21599f10ad95a24f3e3faa6cdba9ab71f4c0e75a3';
-export const LINUX_SHA256_AARCH64 = '5634ce00b811bea585c9df4ed3122294db6b7ec35cbfad8632c767b7edc9d8ce';
+export const LINUX_SHA256_X86_64 = '004e10d96a3f4332c4210b847f8785dd344ccf01997df4dc45b88183ba42791e';
+export const LINUX_SHA256_AARCH64 = 'ed69b0a40b5fc8c2c101ccd13f8413774307d8076c1170dc5f89c7c3220182d2';
 /** The DMG's SHA-256 and the Ed25519 signature the app checks before installing it (scripts/sign-update.sh). */
-export const DMG_SHA256 = '4851e1066e2c4ede2febc81c371c96fe758f3c2e3f27f5c2f9b45f77b338445a';
-export const DMG_SIGNATURE = 'aq9aHvNwPHnsCK6N1DXvHT4N9Fa7ognA/AEhr+L2wpI2RiEHS3t1wbPlwLW53waRnBfuxtGCB5UuupDU2c7ADg==';
+export const DMG_SHA256 = 'f2af88046919d19e9d7beea6db4b0d343b47c293b356413f46018e53af9d8294';
+export const DMG_SIGNATURE = 'tTFVsivUBFkxgVKxXxR7VmXx9ygxBiE0dGoLDOzdDV0+gxmrnwLoPv8wB1S+fCmW0pd4g1zJFbE8ro5zhgULAQ==';

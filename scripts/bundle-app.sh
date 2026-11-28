@@ -27,6 +27,9 @@ case "${1:-}" in
 esac
 # What this build is made from, for scripts/publish-release.sh to check against the tag.
 mkdir -p "$ROOT/dist"
+# Cargo.lock first, as the build will leave it: a version bump changes it.
+(cd "$ROOT" && cargo metadata -q --format-version 1 >/dev/null)
+(cd "$ROOT/app" && cargo metadata -q --format-version 1 >/dev/null)
 "$ROOT/scripts/source-trees.sh" mac >"$ROOT/dist/SOURCE-mac.txt"
 # shellcheck disable=SC2086 # empty when debug
 cargo build -q $RELEASE_FLAG -p swarmd -p swarm-shim -p swarmctl
